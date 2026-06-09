@@ -300,46 +300,48 @@ erDiagram
     users |o--o{ audit_log : "actor (soft, без FK)"
 
     users {
-        uuid id PK
-        text email UK
-        text password_hash "argon2"
-        text kyc_status "pending|approved|rejected"
-        text role "user|operator"
-        int  hd_account_index "ветка пользователя в HD-дереве"
-        timestamptz created_at
+        UUID        id PK "UserId"
+        TEXT        email UK
+        TEXT        password_hash "argon2-хеш"
+        TEXT        kyc_status "KycStatus: pending|approved|rejected"
+        TEXT        role "Role: user|operator"
+        INT         hd_account_index "u32 — ветка в HD-дереве"
+        TIMESTAMPTZ created_at "OffsetDateTime"
     }
     wallets {
-        uuid id PK
-        uuid user_id FK
-        text chain "ethereum|bitcoin|solana"
-        text address "UNIQUE(chain, address)"
-        text derivation_path "UNIQUE(user_id, path)"
-        timestamptz created_at
+        UUID        id PK "WalletId"
+        UUID        user_id FK "UserId"
+        TEXT        chain "Chain: ethereum|bitcoin|solana"
+        TEXT        address "UNIQUE(chain, address)"
+        TEXT        derivation_path "UNIQUE(user_id, path)"
+        TIMESTAMPTZ created_at "OffsetDateTime"
     }
     transactions {
-        uuid id PK
-        uuid wallet_id FK
-        text chain
-        text direction "incoming|outgoing"
-        text to_address
-        text amount_raw "U256 строкой"
-        text fee_raw
-        text status "FSM: created..confirmed/failed/.."
-        text tx_hash
-        text idempotency_key
-        text tracking "nonce (EVM) / blockhash (SOL)"
-        timestamptz created_at
-        timestamptz updated_at
+        UUID        id PK "TransactionId"
+        UUID        wallet_id FK "WalletId; INDEX"
+        TEXT        chain "Chain"
+        TEXT        direction "Direction: incoming|outgoing"
+        TEXT        to_address "nullable"
+        TEXT        amount_raw "U256 — десятичная строка"
+        TEXT        fee_raw "U256 строкой, nullable"
+        TEXT        status "TransactionStatus (FSM)"
+        TEXT        tx_hash "nullable"
+        TEXT        idempotency_key "nullable"
+        TEXT        tracking "nonce (EVM) / blockhash (SOL), nullable"
+        TIMESTAMPTZ created_at "OffsetDateTime"
+        TIMESTAMPTZ updated_at "OffsetDateTime"
     }
     audit_log {
-        bigint id PK
-        uuid actor "кто инициировал (nullable)"
-        text action
-        uuid wallet_id "связанный кошелёк (nullable)"
-        text result "ok|denied|error"
-        timestamptz created_at
+        BIGSERIAL   id PK "i64"
+        UUID        actor "UserId, nullable"
+        TEXT        action
+        UUID        wallet_id "WalletId, nullable"
+        TEXT        result "ok|denied|error"
+        TIMESTAMPTZ created_at "OffsetDateTime"
     }
 ```
+
+Типы в диаграмме — это столбцы Postgres (DDL); в подписях — доменный Rust-тип, в который колонка маппится. Денежные поля и идентификаторы — namespace-новотипы (`UserId`/`WalletId`/`TransactionId` поверх `Uuid`, `U256` поверх `ruint`), enum'ы (`Chain`/`Role`/`KycStatus`/`Direction`/`TransactionStatus`) хранятся своим строковым кодом с `CHECK`-констрейнтом.
 
 Что важно в схеме:
 
