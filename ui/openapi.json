@@ -1,0 +1,497 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "VaultBridge API",
+    "description": "",
+    "license": {
+      "name": "MIT OR Apache-2.0",
+      "identifier": "MIT OR Apache-2.0"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/v1/auth/login": {
+      "post": {
+        "tags": [],
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/v1/users": {
+      "post": {
+        "tags": [],
+        "operationId": "create_user",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUserRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserProfile"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": ""
+          },
+          "422": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/v1/users/{id}": {
+      "get": {
+        "tags": [],
+        "operationId": "get_user",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "user id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserProfile"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/v1/wallets": {
+      "get": {
+        "tags": [],
+        "operationId": "list_wallets",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/WalletDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": ""
+          }
+        }
+      },
+      "post": {
+        "tags": [],
+        "operationId": "create_wallet",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateWalletRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WalletDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": ""
+          },
+          "422": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/v1/wallets/{id}/transactions": {
+      "get": {
+        "tags": [],
+        "operationId": "list_transactions",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "wallet id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "401": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/v1/wallets/{id}/withdraw": {
+      "post": {
+        "tags": [],
+        "summary": "Вывод средств как сага (`spec.md` §6.5): идемпотентность → гейты → lock →\nкомиссия/достаточность → pending → build → sign → broadcast → unconfirmed.",
+        "operationId": "withdraw",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "wallet id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WithdrawRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WithdrawResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          },
+          "409": {
+            "description": ""
+          },
+          "422": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/v1/wallets/{id}/withdraw/quote": {
+      "post": {
+        "tags": [],
+        "summary": "Оценка вывода без побочных эффектов (`spec.md` §6.1): комиссия, потолок, итог,\nдоступный баланс — для отображения в форме до подтверждения (`spec-ui.md` §9).",
+        "operationId": "withdraw_quote",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "wallet id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WithdrawRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuoteResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          },
+          "422": {
+            "description": ""
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CreateUserRequest": {
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateWalletRequest": {
+        "type": "object",
+        "required": [
+          "chain"
+        ],
+        "properties": {
+          "chain": {
+            "type": "string",
+            "description": "ethereum|bitcoin|solana"
+          }
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        }
+      },
+      "LoginResponse": {
+        "type": "object",
+        "required": [
+          "access_token",
+          "expires_in"
+        ],
+        "properties": {
+          "access_token": {
+            "type": "string"
+          },
+          "expires_in": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "QuoteResponse": {
+        "type": "object",
+        "required": [
+          "estimated_fee_raw",
+          "max_fee_raw",
+          "total_debit_raw",
+          "spendable_raw"
+        ],
+        "properties": {
+          "estimated_fee_raw": {
+            "type": "string"
+          },
+          "max_fee_raw": {
+            "type": "string"
+          },
+          "spendable_raw": {
+            "type": "string"
+          },
+          "total_debit_raw": {
+            "type": "string"
+          }
+        }
+      },
+      "UserProfile": {
+        "type": "object",
+        "required": [
+          "id",
+          "email",
+          "kyc_status",
+          "role"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kyc_status": {
+            "type": "string",
+            "description": "pending|approved|rejected"
+          },
+          "role": {
+            "type": "string",
+            "description": "user|operator"
+          }
+        }
+      },
+      "WalletDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "chain",
+          "address",
+          "derivation_path",
+          "created_at_unix"
+        ],
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "chain": {
+            "type": "string"
+          },
+          "created_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "derivation_path": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "WithdrawRequestDto": {
+        "type": "object",
+        "required": [
+          "to_address",
+          "amount_raw"
+        ],
+        "properties": {
+          "amount_raw": {
+            "type": "string",
+            "description": "Сумма в минимальных единицах (U256 как строка)."
+          },
+          "max_fee_raw": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Опциональный потолок комиссии (slippage, §6.5). Иначе — estimate × fee_cap_factor."
+          },
+          "to_address": {
+            "type": "string"
+          }
+        }
+      },
+      "WithdrawResponse": {
+        "type": "object",
+        "required": [
+          "tx_id",
+          "status",
+          "fee_raw"
+        ],
+        "properties": {
+          "fee_raw": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "tx_hash": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tx_id": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

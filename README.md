@@ -1,0 +1,325 @@
+# VaultBridge
+
+> Кастодиальный кошелёк на Rust сразу для нескольких блокчейнов: заводит адреса, хранит ключи в изоляции, собирает и подписывает транзакции, отдаёт балансы и историю через REST, GraphQL и WebSocket. Это портфолио-проект — на нём я показываю, как строю безопасные сервисы на боевом Rust-стеке.
+
+[![CI](https://github.com/)](.github/workflows/ci.yml) · Rust 1.95 · axum 0.8 · Next.js 15
+
+---
+
+## Содержание
+
+- [Что это](#что-это)
+- [Архитектура](#архитектура)
+- [Канал к signing-service (gRPC, mTLS)](#канал-к-signing-service-grpc-mtls)
+- [Технологический стек](#технологический-стек)
+- [Структура репозитория](#структура-репозитория)
+- [Модель угроз и решения по безопасности](#модель-угроз-и-решения-по-безопасности)
+- [Сборка и запуск](#сборка-и-запуск)
+- [Деплой (Railway + Vercel)](#деплой-railway--vercel)
+- [Обзор API](#обзор-api)
+
+---
+
+## Что это
+
+VaultBridge — уменьшенная, но честная по архитектуре копия кастодиального сервиса. Всё крутится вокруг одной мысли — **изоляции ключей**: публичный шлюз никогда не держит приватные ключи, подписывает их отдельный сервис. Внутри живут три блокчейна с принципиально разной механикой транзакций (EVM — account-модель, Bitcoin — UTXO, Solana — эфемерный blockhash), и все три спрятаны за одним `trait BlockchainClient`.
+
+---
+
+## Архитектура
+
+```mermaid
+flowchart TB
+    Client["Клиенты — REST / WebSocket / GraphQL"]
+
+    subgraph GW["api-gateway (axum)"]
+        direction TB
+        MW["tower-слои: auth · rate-limit · trace · timeout · body-limit · CORS<br/>KYC / AML / валидация адреса — экстракторы"]
+        ST["AppState: репозитории · клиенты сетей · кеш ·<br/>signer-хендл · аудит · метрики"]
+    end
+
+    SS["signing-service (внутренний, без публичного HTTP)<br/>HD-ключи: BIP39/32 + SLIP-0010 · envelope encryption · zeroize · подпись"]
+    RPC["Блокчейн-RPC — EVM / Bitcoin / Solana (testnet/devnet)"]
+    SEED[("seed под KEK<br/>(зашифрован)")]
+    PG[("PostgreSQL — истина")]
+    RD[("Redis — кеш / idempotency")]
+    CH[("ClickHouse — аналитика")]
+
+    Client -->|HTTPS + JWT| GW
+    GW -->|"gRPC + mTLS"| SS
+    GW -->|async RPC| RPC
+    SS --> SEED
+    GW --> PG
+    GW --> RD
+    GW --> CH
+```
+
+<sub>Граница gateway↔signing — единый `trait Signer`; в production это `RemoteSigner` поверх gRPC + взаимного TLS (детали ниже). Сам ключ живёт в `signing-service`, а не в gateway.</sub>
+
+**Принцип изоляции.** Даже если публичный `api-gateway` скомпрометируют, ключи не утекут — их попросту нет в его памяти. Шлюз только авторизует операцию и просит `signing-service` подписать по пути деривации (`derivation_path`); приватный ключ к нему не возвращается. В этом и весь смысл кастодиальной модели.
+
+**Сага вывода.** Вывод денег задевает сразу три системы — базу, `signing-service` и RPC блокчейна. Чтобы частичный сбой не обернулся потерей или задвоением средств, путь оформлен сагой: идемпотентность, лок на кошелёк, конечный автомат статусов и реконсиляция.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Клиент
+    participant GW as api-gateway
+    participant DB as Postgres
+    participant S as signing-service
+    participant N as Chain RPC
+
+    U->>GW: POST /withdraw (Idempotency-Key)
+    GW->>GW: idempotency begin (SET NX)
+    GW->>GW: гейты — ownership · KYC · адрес · AML
+    GW->>GW: per-wallet lock (advisory)
+    GW->>N: estimate_fee + balance (свежий)
+    GW->>DB: tx = pending (+ outbox)
+    GW->>S: sign(derivation_path, sighash)
+    S-->>GW: signature (ключ НЕ покидает сервис)
+    GW->>N: broadcast(signed)
+    N-->>GW: tx_hash
+    GW->>DB: status = unconfirmed
+    GW-->>U: 200 { tx_id, unconfirmed, tx_hash }
+```
+
+Машина состояний транзакции (`core-domain::TxStatus`):
+
+```mermaid
+stateDiagram-v2
+    [*] --> created
+    created --> signing
+    signing --> broadcast
+    broadcast --> unconfirmed
+    unconfirmed --> confirmed
+    unconfirmed --> failed
+    unconfirmed --> expired: Solana — протух blockhash
+    unconfirmed --> replaced: EVM — bump gas / RBF
+    confirmed --> unconfirmed: реорг (откат сканером)
+    confirmed --> failed
+    confirmed --> replaced
+    created --> failed
+    signing --> failed
+    confirmed --> [*]
+    failed --> [*]
+```
+
+Финализацию ведёт фоновый block-scanner: он спрашивает у адаптера наблюдаемое состояние (`TxObservation`) и двигает FSM вперёд (`confirmed`), в терминальные неуспехи (`failed`/`expired`/`replaced`) или откатывает `confirmed → unconfirmed` при реорге. Чтобы отличить «заменена»/«истекла» от «ещё не дошла», сага сохраняет рядом с транзакцией chain-specific токен (`tracking`: EVM — nonce, Solana — recent blockhash); по нему адаптер проверяет, не занял ли nonce другую транзакцию (EVM) и не протух ли blockhash (Solana).
+
+---
+
+## Канал к signing-service (gRPC, mTLS)
+
+Изоляция ключей держится не только на типах, но и на границе процессов. `signing-service` — отдельный gRPC-сервер на `tonic`: он хранит seed и наружу отдаёт **только адреса и подписи**. `api-gateway` ходит к нему через `RemoteSigner`, который реализует тот же `trait Signer`, что и локальный `LocalSigner`. Саге вывода поэтому всё равно, где физически лежит ключ.
+
+В production gateway всегда ходит к удалённому `signing-service` (адрес — `SIGNER_GRPC_ENDPOINT`); `LocalSigner` остаётся внутри самого `signing-service` как крипто-ядро. Канал закрыт **взаимным TLS**: обе стороны показывают сертификаты от общего CA и проверяют друг друга. Без валидного клиентского сертификата до подписи не достучаться, а gateway не подключится к подменённому signer'у.
+
+```mermaid
+flowchart LR
+    CA["Demo CA<br/>scripts/gen-certs.sh"]
+
+    subgraph GW["api-gateway (публичный)"]
+        direction TB
+        SAGA["withdraw saga · create wallet"]
+        REMOTE["RemoteSigner<br/>(gRPC-клиент, trait Signer)"]
+        SAGA -->|"Signer::sign(...).await"| REMOTE
+    end
+
+    subgraph SS["signing-service (изолированный процесс)"]
+        direction TB
+        SVC["SignerService<br/>(tonic gRPC)"]
+        LS["LocalSigner<br/>(крипто-ядро)"]
+        SEED[("seed под KEK<br/>zeroize")]
+        SVC --> LS --> SEED
+    end
+
+    CA -. "client cert" .-> REMOTE
+    CA -. "server cert" .-> SVC
+    REMOTE ==>|"gRPC / HTTP2 поверх mTLS<br/>client cert ↔ server cert,<br/>оба проверяются по CA"| SVC
+```
+
+Рукопожатие и подпись по шагам (что проверяет интеграционный тест на loopback):
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant GW as api-gateway (RemoteSigner)
+    participant SS as signing-service (SignerService)
+
+    Note over GW,SS: TLS-рукопожатие (взаимная аутентификация)
+    GW->>SS: ClientHello + клиентский сертификат
+    SS->>SS: проверка client cert по CA → иначе разрыв
+    SS-->>GW: серверный сертификат
+    GW->>GW: проверка server cert по CA + SAN(domain)
+    Note over GW,SS: канал зашифрован, обе стороны доверены
+
+    GW->>SS: Sign { chain, derivation_path, payload } (gRPC)
+    SS->>SS: derive key by path → подпись (ключ НЕ уходит)
+    SS-->>GW: signature
+```
+
+**Контракт** (`crates/proto/proto/signer.proto`): `service Signer { DeriveAddress, Sign }`. Через границу передаются только `chain` + `derivation_path` + `payload`; ответ — адрес или байты подписи (secp256k1 65 байт `r‖s‖v` или ed25519 64 байта). Строители TLS-конфигов вынесены в `proto::tls`, чтобы сервер, клиент и тест использовали один security-критичный код.
+
+**Запуск двух процессов локально:**
+
+```bash
+./scripts/gen-certs.sh                 # → certs/{ca,server,client}.{crt,key}
+
+# терминал 1 — signing-service с mTLS
+SIGNER_BIND=0.0.0.0:50051 \
+SIGNER_TLS_CERT=certs/server.crt SIGNER_TLS_KEY=certs/server.key \
+SIGNER_TLS_CLIENT_CA=certs/ca.crt \
+cargo run -p signing-service
+
+# терминал 2 — gateway, ходит за подписью по mTLS
+SIGNER_GRPC_ENDPOINT=https://localhost:50051 \
+SIGNER_TLS_CLIENT_CERT=certs/client.crt SIGNER_TLS_CLIENT_KEY=certs/client.key \
+SIGNER_TLS_CA=certs/ca.crt SIGNER_TLS_DOMAIN=localhost \
+cargo run -p api-gateway
+```
+
+| Переменная | Сторона | Назначение |
+|------------|---------|-----------|
+| `SIGNER_GRPC_ENDPOINT` | gateway | адрес signing-service (обязателен) |
+| `SIGNER_TLS_CLIENT_CERT` / `_KEY` | gateway | клиентский сертификат/ключ (mTLS) |
+| `SIGNER_TLS_CA` | gateway | CA для проверки сервера |
+| `SIGNER_TLS_DOMAIN` | gateway | ожидаемый SAN сервера |
+| `SIGNER_BIND` | signing | адрес прослушивания (деф. `0.0.0.0:50051`) |
+| `SIGNER_TLS_CERT` / `_KEY` | signing | серверный сертификат/ключ |
+| `SIGNER_TLS_CLIENT_CA` | signing | CA для проверки клиента (включает mTLS) |
+
+Если TLS-переменные не заданы, канал остаётся plaintext — это допустимо только в доверенной приватной сети для локальной отладки. В проде сертификаты выдаёт внутренний CA / cert-manager / service-mesh (например SPIFFE), а не демо-скрипт.
+
+---
+
+## Технологический стек
+
+| Слой | Технологии |
+|------|-----------|
+| HTTP/API | `axum` 0.8, `tower`, REST + GraphQL (`async-graphql`) + WebSocket |
+| Контракт | OpenAPI (`utoipa`) → кодоген типов фронта |
+| Async | `tokio` |
+| Криптография | `bip39`/`bip32` (secp256k1), SLIP-0010 (ed25519), `k256`, `ed25519-dalek`, `aes-gcm` (envelope), `argon2`, `zeroize` |
+| Сети | `alloy` (EVM), `rust-bitcoin` + Esplora (BTC), JSON-RPC + ручной wire (Solana, без `solana-sdk`) |
+| gateway↔signing | `tonic`/`prost` (gRPC), взаимный TLS (`rustls` через tonic), контракт в крейте `proto` |
+| Хранилище | PostgreSQL (`diesel`/`diesel-async`), Redis, ClickHouse |
+| Наблюдаемость | `tracing`, Prometheus-метрики, `/healthz` + `/readyz` |
+| Фронтенд | Next.js 15 + TypeScript, TanStack Query, Tailwind, деньги на `bigint` |
+| Тесты | `cargo test` (unit/property/integration), Vitest + Playwright |
+
+---
+
+## Структура репозитория
+
+```
+VaultBridge/
+├── crates/
+│   ├── core-domain/      # Chain, KycStatus, Role, Amount<U256>, TxStatus (FSM), newtypes
+│   ├── storage/          # репозитории/кеш/локи/аналитика: Postgres(diesel-async) · Redis · ClickHouse
+│   ├── blockchain/       # trait BlockchainClient + ChainConfig (+ MockChain под фичой testing)
+│   ├── chain-evm/        # alloy-адаптер (EIP-1559 build/sign/broadcast/confirmations)
+│   ├── chain-btc/        # rust-bitcoin + Esplora (legacy-P2PKH UTXO spend)
+│   ├── chain-sol/        # JSON-RPC + ручной wire (System transfer, ed25519)
+│   ├── signing-service/  # HD-деривация, envelope encryption, multisig, подпись + gRPC-сервер (lib + bin)
+│   ├── kyc-aml/          # KycProvider + AmlScreener (HTTP-провайдеры; моки — под фичой testing)
+│   ├── proto/            # gRPC-контракт Signer (tonic/prost) + mTLS-строители (proto::tls)
+│   └── api-gateway/      # axum-сервер: auth/RBAC, сага, GraphQL, ops, scanner, RemoteSigner
+├── ui/                   # Next.js фронтенд (auth, кошельки, вывод, real-time, операторская консоль)
+├── migrations/           # SQL-схема (применяется на старте, идемпотентно)
+├── scripts/gen-certs.sh  # демо CA + server/client серты для mTLS (не коммитятся)
+├── Dockerfile            # multi-stage сборка api-gateway
+├── railway.json          # деплой-конфиг (Railway)
+├── docker-compose.yml    # postgres / redis / clickhouse (локально)
+└── .github/workflows/    # CI: fmt + clippy + test + build (backend), tsc/lint/test/build (ui)
+```
+
+---
+
+## Модель угроз и решения по безопасности
+
+| Угроза | Контрмера |
+|--------|-----------|
+| Компрометация публичного API-слоя | Ключей нет в памяти gateway; подпись — только через изолированный `signing-service` |
+| Несанкционированный доступ к signer / MITM канала | Взаимный TLS gateway↔signing: сервер требует клиентский сертификат, клиент проверяет сервер по CA; без валидного серта подпись недоступна |
+| Кража БД | Envelope encryption: ключ под DEK, DEK под KEK; KEK вне БД; `key_material` в отдельной схеме с отдельной DB-ролью |
+| Утечка ключа из памяти | `zeroize`/`Zeroizing`, минимальное время жизни расшифрованного материала |
+| Доступ к чужому кошельку (IDOR) | Проверка владения в репозитории, экстрактор `OwnedWallet`, `404` вместо `403` |
+| Превышение полномочий оператора | `operator` — только чтение + разбор; нет доступа к ключам и инициации вывода; `RequireOperator` + аудит |
+| Двойной вывод (replay) | `Idempotency-Key` (неймспейс по user) + идемпотентный broadcast; per-wallet lock |
+| Потеря/задвоение при частичном сбое | Сага с outbox + реконсиляция по `tx_hash` |
+| Вывод на адрес чужой сети / битый | Per-chain валидация формата и network до подписи |
+| Списание больше доступного | Проверка `spendable ≥ amount + fee` (свежий баланс, мимо кеша), dust-limit, потолок комиссии |
+| Вывод на запрещённый адрес | AML-блэклист до бизнес-логики |
+| Операции без верификации | KYC-гейт перед выводом |
+| Устаревший баланс | Кеш с TTL + инвалидация при изменении состояния кошелька |
+| Отсутствие следа операций | Append-only аудит-лог (успех и отказы) |
+
+Денежные величины — целочисленные минимальные единицы (`U256`, в БД `NUMERIC(78,0)`), никогда `f64`/`Number`; на фронте — `bigint`. Точность стережётся на обеих границах (ввод и хранение).
+
+---
+
+## Сборка и запуск
+
+**Требования:** Rust 1.95+, Node 22+, Docker (для БД).
+
+```bash
+# Инфраструктура (Postgres/Redis/ClickHouse)
+docker compose up -d
+
+# Бэкенд: проверки и запуск
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+# Запуск (требует заданных DATABASE_URL/REDIS_URL/CLICKHOUSE_URL/EVM_RPC_URL/
+# SIGNER_GRPC_ENDPOINT/KYC_PROVIDER_URL/AML_SCREENING_URL — см. .env.example).
+# Сначала поднимается signing-service (отдельный процесс), затем gateway.
+cargo run -p api-gateway          # слушает :8080
+
+# OpenAPI-спека (для кодогена фронта) — env не требует
+cargo run -p api-gateway -- openapi > ui/openapi.json
+
+# Фронтенд
+cd ui && npm install
+npm run typecheck && npm run lint && npm run test && npm run build
+npm run dev                       # http://localhost:3000
+```
+
+Сервис production-only: без обязательных переменных он не стартует. Пользователей и кошельки заводят через API (`POST /v1/users`, `POST /v1/wallets`) — встроенных демо-аккаунтов нет.
+
+---
+
+## Деплой (Railway + Vercel)
+
+Топология — два сервиса: публичный `api-gateway` и изолированный `signing-service`. Gateway требует Postgres, Redis, ClickHouse, RPC сетей, KYC/AML-провайдеры и адрес signing-service — все обязательные переменные перечислены в `.env.example`.
+
+**Backend на Railway:**
+1. New Project → Deploy from Repo (Railway подхватит `Dockerfile`/`railway.json`).
+2. Add Postgres + Redis (плагины) — `DATABASE_URL`/`REDIS_URL` пробросятся в сервис; ClickHouse и RPC сетей задаются вручную.
+3. Разверните `signing-service` отдельным сервисом и пропишите gateway `SIGNER_GRPC_ENDPOINT` + клиентские `SIGNER_TLS_*` (см. [Канал к signing-service](#канал-к-signing-service-grpc-mtls)). Seed живёт только в нём.
+4. Остальные переменные: `JWT_SECRET`, `KYC_PROVIDER_URL`, `AML_SCREENING_URL`, `CORS_ORIGIN`. См. `.env.example`.
+5. Схема применяется на старте (`run_migrations`, идемпотентно). Healthcheck — `/healthz`.
+
+**Frontend на Vercel:**
+1. Import `ui/` как Next.js проект.
+2. `NEXT_PUBLIC_API_BASE_URL` = URL Railway-сервиса; explorer-URL из `.env.example`.
+
+**TLS к managed-БД:** Redis по `rediss://` поддержан (rustls). Postgres на Railway — по приватной сети без TLS; для Neon (`sslmode=require`) нужно включить TLS у `diesel-async` (`tokio-postgres-rustls`) — оставлено как шаг под конкретного провайдера.
+
+**Альтернатива (free-навсегда):** Fly.io (api + signing-service) + Neon (PG) + Upstash (Redis) — добавить `fly.toml` поверх того же `Dockerfile`.
+
+---
+
+## Обзор API
+
+| Метод | Путь | Назначение |
+|-------|------|-----------|
+| `POST` | `/v1/auth/login` | выпуск JWT (claims `sub`/`role`/`kid`) |
+| `POST` | `/v1/users` | создать пользователя (KYC-онбординг) |
+| `GET` | `/v1/wallets` · `POST /v1/wallets` | список / создание кошелька (HD-адрес) |
+| `POST` | `/v1/wallets/{id}/withdraw/quote` | оценка комиссии/итога без побочек |
+| `POST` | `/v1/wallets/{id}/withdraw` | вывод (сага; `Idempotency-Key`) |
+| `POST` | `/v1/graphql` | агрегированный портфель по сетям |
+| `GET` | `/v1/ops/audit` · `/v1/ops/withdrawals` | операторский доступ (`operator`) |
+| `GET` | `/healthz` · `/readyz` · `/metrics` | liveness / readiness / Prometheus |
+
+Полный контракт — в `/api-docs/openapi.json`.

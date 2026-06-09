@@ -1,0 +1,48 @@
+# Инфраструктура VaultBridge (spec.md §12). Этап 0: только хранилища.
+# Сервисы api-gateway/signing-service добавляются на следующих этапах.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: vaultbridge
+      POSTGRES_PASSWORD: vaultbridge
+      POSTGRES_DB: vaultbridge
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vaultbridge"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    environment:
+      CLICKHOUSE_USER: vaultbridge
+      CLICKHOUSE_PASSWORD: vaultbridge
+      CLICKHOUSE_DB: vaultbridge
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - chdata:/var/lib/clickhouse
+
+volumes:
+  pgdata:
+  chdata:

@@ -1,0 +1,13 @@
+[package]
+name = "chain-btc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+core-domain = { workspace = true }
+blockchain = { workspace = true }
+async-trait = "0.1"
+serde = { workspace = true }
+bitcoin = { version = "0.32", features = ["serde", "secp-recovery"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

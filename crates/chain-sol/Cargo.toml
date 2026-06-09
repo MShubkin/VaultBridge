@@ -1,0 +1,14 @@
+[package]
+name = "chain-sol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+core-domain = { workspace = true }
+blockchain = { workspace = true }
+async-trait = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+bs58 = "0.5"

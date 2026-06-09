@@ -1,0 +1,12 @@
+[package]
+name = "chain-evm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+core-domain = { workspace = true }
+blockchain = { workspace = true }
+async-trait = "0.1"
+serde_json = { workspace = true }
+alloy = { version = "0.8", features = ["provider-http", "rpc-types-eth", "consensus", "network", "eips", "rlp", "serde"] }

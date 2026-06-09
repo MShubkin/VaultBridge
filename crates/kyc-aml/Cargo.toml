@@ -1,0 +1,20 @@
+[package]
+name = "kyc-aml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+core-domain = { workspace = true }
+async-trait = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[features]
+# Моки KYC/AML — только для тестов, в production используются HTTP-провайдеры.
+testing = []
+
+[dev-dependencies]
+tokio = { workspace = true }

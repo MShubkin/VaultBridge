@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core-domain",
+    "crates/storage",
+    "crates/blockchain",
+    "crates/chain-evm",
+    "crates/chain-btc",
+    "crates/chain-sol",
+    "crates/kyc-aml",
+    "crates/proto",
+    "crates/api-gateway",
+    "crates/signing-service",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# shared third-party
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+anyhow = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+ruint = { version = "1", features = ["serde"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync"] }
+axum = { version = "0.8", features = ["ws"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+# gRPC (gateway ↔ signing-service, §8.2) + mTLS
+tonic = { version = "0.12", features = ["tls"] }
+prost = "0.13"
+tonic-build = "0.12"
+rcgen = "0.13"
+
+# internal
+core-domain = { path = "crates/core-domain" }
+storage = { path = "crates/storage" }
+blockchain = { path = "crates/blockchain" }
+chain-evm = { path = "crates/chain-evm" }
+chain-btc = { path = "crates/chain-btc" }
+chain-sol = { path = "crates/chain-sol" }
+signing-service = { path = "crates/signing-service" }
+kyc-aml = { path = "crates/kyc-aml" }
+proto = { path = "crates/proto" }

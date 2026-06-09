@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+// gRPC-контракт gateway ↔ signing-service.
+// Через границу передаются только derivation_path + payload; приватный ключ
+// никогда не покидает signing-service (custodial-изоляция).
+package vaultbridge.signer.v1;
+
+service Signer {
+  // Адрес для пути деривации (создание кошелька).
+  rpc DeriveAddress(DeriveAddressRequest) returns (DeriveAddressResponse);
+  // Подпись payload ключом по пути деривации: EVM/BTC — 32-байтовый
+  // prehash (secp256k1, 65 байт r||s||v), Solana — всё сообщение (ed25519, 64).
+  rpc Sign(SignRequest) returns (SignResponse);
+}
+
+// chain — строковый код (core_domain::Chain::as_str): "ethereum"|"bitcoin"|"solana".
+message DeriveAddressRequest {
+  string chain = 1;
+  string path = 2;
+}
+
+message DeriveAddressResponse {
+  string address = 1;
+}
+
+message SignRequest {
+  string chain = 1;
+  string path = 2;
+  bytes payload = 3;
+}
+
+message SignResponse {
+  bytes signature = 1;
+}

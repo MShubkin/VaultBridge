@@ -1,0 +1,29 @@
+[package]
+name = "storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+core-domain = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+async-trait = "0.1"
+time = { version = "0.3", features = ["serde"] }
+# Postgres через diesel-async без libpq: diesel только как postgres_backend (типы),
+# реальный транспорт — tokio-postgres внутри diesel-async.
+diesel = { version = "2.2", default-features = false, features = ["postgres_backend", "uuid", "time"] }
+diesel-async = { version = "0.5", features = ["postgres", "bb8"] }
+# diesel-async использует futures_util::try_join! — нужна фича async-await-macro.
+futures-util = { version = "0.3", features = ["async-await-macro"] }
+redis = { version = "0.27", features = ["tokio-comp", "tokio-rustls-comp"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[features]
+# Тест-двойники (in-memory репозитории/кеш/локи/аналитика) не входят в production-сборку.
+# Компилируются только при тестировании самого крейта либо когда зависящий крейт включает
+# фичу `testing` в своих dev-dependencies.
+testing = []
