@@ -9,6 +9,7 @@
 ## Содержание
 
 - [Что это](#что-это)
+- [Обзор API](#обзор-api)
 - [Архитектура](#архитектура)
 - [Реконсиляция (block-scanner)](#реконсиляция-block-scanner)
 - [Канал к signing-service (gRPC, mTLS)](#канал-к-signing-service-grpc-mtls)
@@ -21,7 +22,6 @@
 - [Сборка и запуск](#сборка-и-запуск)
 - [Тестирование](#тестирование)
 - [Деплой (Railway + Vercel)](#деплой-railway--vercel)
-- [Обзор API](#обзор-api)
 - [Границы и что дальше](#границы-и-что-дальше)
 
 ---
@@ -29,6 +29,68 @@
 ## Что это
 
 VaultBridge — уменьшенная, но честная по архитектуре копия кастодиального сервиса. Всё крутится вокруг одной мысли — **изоляции ключей**: публичный шлюз никогда не держит приватные ключи, подписывает их отдельный сервис. Внутри живут три блокчейна с принципиально разной механикой транзакций (EVM — account-модель, Bitcoin — UTXO, Solana — эфемерный blockhash), и все три спрятаны за одним `trait BlockchainClient`.
+
+---
+
+## Обзор API
+
+Три транспорта: **REST** (основное), **GraphQL** (агрегированный портфель) и **WebSocket** (real-time статусы). Полный машинно-читаемый контракт публикуется как OpenAPI на `/api-docs/openapi.json` — из него генерятся типы фронта.
+
+| Метод | Путь | Доступ | Назначение |
+|-------|------|--------|-----------|
+| `POST` | `/v1/auth/login` | публичный | выпуск JWT |
+| `POST` | `/v1/users` | публичный | регистрация + KYC-онбординг |
+| `GET` | `/v1/users/{id}` | JWT | профиль пользователя |
+| `GET` · `POST` | `/v1/wallets` | JWT | список / создание кошелька (HD-адрес) |
+| `GET` | `/v1/wallets/{id}/transactions` | JWT | история кошелька (курсорная пагинация) |
+| `POST` | `/v1/wallets/{id}/withdraw/quote` | JWT | оценка комиссии/итога без побочных эффектов |
+| `POST` | `/v1/wallets/{id}/withdraw` | JWT | вывод средств (сага; `Idempotency-Key`) |
+| `POST` | `/v1/graphql` | JWT | агрегированный портфель по сетям |
+| `GET` | `/v1/ws` | JWT¹ | real-time события статусов транзакций |
+| `GET` | `/v1/ops/audit` · `/v1/ops/withdrawals` | operator | аудит-лог / все выводы по всем пользователям |
+| `GET` | `/healthz` · `/readyz` · `/metrics` | публичный | liveness / readiness / Prometheus |
+
+¹ WebSocket: JWT передаётся как `Sec-WebSocket-Protocol` (браузер не шлёт `Authorization` при апгрейде); сервер фильтрует поток по кошелькам пользователя.
+
+**Аутентификация и доступ.** Токен — `Authorization: Bearer <jwt>` с claims `sub`/`role`/`exp`. Обычный пользователь видит только свои ресурсы (экстрактор `OwnedWallet`, чужой кошелёк → `404`, а не `403`). Операторские `/v1/ops/*` требуют роль `operator` (`RequireOperator`).
+
+**Формат ошибок.** Всегда `{ "code": "...", "message": "..." }`, без утечки внутренних деталей (SQL/RPC — только в логах). Коды: `401` unauthorized, `403` forbidden, `404` not_found, `409` conflict (в т.ч. параллельный дубль по `Idempotency-Key`), `422` validation / limit_exceeded, `500` internal.
+
+**Деньги.** Все суммы в телах — строки в минимальных единицах сети (`amount_raw`, `fee_raw`, … как `U256`), без `float`.
+
+**Основные потоки (тела запроса/ответа):**
+
+```http
+POST /v1/auth/login
+{ "email": "user@example.com", "password": "..." }
+→ 200 { "access_token": "<jwt>", "expires_in": 3600 }
+→ 401 при неверных данных (не различаем «нет пользователя» и «неверный пароль»)
+```
+
+```http
+POST /v1/wallets            Authorization: Bearer <jwt>
+{ "chain": "ethereum" }
+→ 200 { "id": "...", "chain": "ethereum",
+        "address": "0x..", "derivation_path": "m/44'/60'/0'/0/0",
+        "created_at_unix": 1750000000 }
+```
+
+```http
+POST /v1/wallets/{id}/withdraw/quote        Authorization: Bearer <jwt>
+{ "to_address": "0x..", "amount_raw": "1000000000000000", "max_fee_raw": null }
+→ 200 { "estimated_fee_raw": "...", "max_fee_raw": "...",
+        "total_debit_raw": "...", "spendable_raw": "..." }   // без побочек, для предпросмотра
+```
+
+```http
+POST /v1/wallets/{id}/withdraw
+Authorization: Bearer <jwt>
+Idempotency-Key: 4f3c...   (обязателен)
+{ "to_address": "0x..", "amount_raw": "1000000000000000" }
+→ 200 { "tx_id": "...", "status": "unconfirmed", "tx_hash": "0x..", "fee_raw": "..." }
+```
+
+Вывод запускает сагу с гейтами: ownership → KYC → валидация адреса/сети → AML → per-wallet lock → достаточность средств (`spendable ≥ amount + fee`), dust-лимит и потолок комиссии. Повтор с тем же `Idempotency-Key` возвращает сохранённый ответ, параллельный дубль → `409`. Дальше статус доводит фоновый [реконсилятор](#реконсиляция-block-scanner), а клиент может слушать переходы по `GET /v1/ws`.
 
 ---
 
@@ -501,24 +563,6 @@ Quality gate в CI: `cargo fmt --all --check` + `cargo clippy --workspace --all-
 **TLS к managed-БД:** Redis по `rediss://` поддержан (rustls). Postgres на Railway — по приватной сети без TLS; для Neon (`sslmode=require`) нужно включить TLS у `diesel-async` (`tokio-postgres-rustls`) — оставлено как шаг под конкретного провайдера.
 
 **Альтернатива (free-навсегда):** Fly.io (api + signing-service) + Neon (PG) + Upstash (Redis) — добавить `fly.toml` поверх того же `Dockerfile`.
-
----
-
-## Обзор API
-
-| Метод | Путь | Назначение |
-|-------|------|-----------|
-| `POST` | `/v1/auth/login` | выпуск JWT (claims `sub`/`role`/`kid`) |
-| `POST` | `/v1/users` | создать пользователя (KYC-онбординг) |
-| `GET` | `/v1/wallets` · `POST /v1/wallets` | список / создание кошелька (HD-адрес) |
-| `POST` | `/v1/wallets/{id}/withdraw/quote` | оценка комиссии/итога без побочек |
-| `POST` | `/v1/wallets/{id}/withdraw` | вывод (сага; `Idempotency-Key`) |
-| `POST` | `/v1/graphql` | агрегированный портфель по сетям |
-| `GET` | `/v1/ws` | real-time события статусов (JWT через `Sec-WebSocket-Protocol`) |
-| `GET` | `/v1/ops/audit` · `/v1/ops/withdrawals` | операторский доступ (`operator`) |
-| `GET` | `/healthz` · `/readyz` · `/metrics` | liveness / readiness / Prometheus |
-
-Полный контракт — в `/api-docs/openapi.json`.
 
 ---
 
