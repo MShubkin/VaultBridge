@@ -12,6 +12,7 @@
 - [Обзор API](#обзор-api)
 - [Архитектура](#архитектура)
 - [Реконсиляция (block-scanner)](#реконсиляция-block-scanner)
+- [Real-time (WebSocket)](#real-time-websocket)
 - [Канал к signing-service (gRPC, mTLS)](#канал-к-signing-service-grpc-mtls)
 - [Технологический стек](#технологический-стек)
 - [Структура репозитория](#структура-репозитория)
@@ -231,6 +232,45 @@ flowchart TD
 **Надёжность воркера.** Логика разнесена на чистую `next_status` (тестируется как таблица истинности) и тонкий `reconcile_once`, который ходит в БД/сеть. Всё best-effort: ошибка RPC или БД логируется и не валит сервер — транзакция переедет на следующем тике. `MissedTickBehavior::Skip` не копит «долг» тиков, если проход затянулся.
 
 **Известное упрощение.** Сейчас сканер перепроверяет все `confirmed`-записи на каждом тике. В проде это ограничивают глубиной блока (перепроверять только то, что в пределах `reorg_window` от вершины); для портфолио-объёма перепроверка всех приемлема и помечена в коде.
+
+---
+
+## Real-time (WebSocket)
+
+Статусы транзакций меняются асинхронно (это делает реконсилятор, а не HTTP-запрос вывода). Чтобы UI не опрашивал сервер в цикле, изменения **пушатся** клиенту по WebSocket (`GET /v1/ws`, код — `crates/api-gateway/src/events.rs`).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Клиент (браузер)
+    participant WS as ws_handler · pump
+    participant BUS as broadcast-канал
+    participant SAGA as withdraw-saga
+    participant SCAN as block-scanner
+
+    Note over C,WS: подключение
+    C->>WS: GET /v1/ws · JWT в Sec-WebSocket-Protocol
+    WS->>WS: verify JWT → user_id (иначе 401, апгрейда нет)
+    WS-->>C: 101 Switching Protocols (echo subprotocol)
+    WS->>BUS: subscribe()
+
+    Note over SAGA,SCAN: источники событий
+    SAGA->>BUS: publish(WalletEvent · status=unconfirmed)
+    SCAN->>BUS: publish(WalletEvent · status=confirmed/failed/expired/…)
+
+    BUS-->>WS: WalletEvent (fan-out всем подписчикам)
+    WS->>WS: event.user_id == мой? иначе пропустить
+    WS-->>C: JSON { wallet_id, tx_id, status, tx_hash }
+    Note over C: UI обновляет статус и баланс без поллинга
+```
+
+Как устроено:
+
+- **Два источника событий** — сага вывода (довела до `unconfirmed`) и block-scanner (любой переход FSM); оба вызывают `events::publish(...)`.
+- **Шина** — `tokio::sync::broadcast` (буфер 1024): один `publish`, fan-out всем активным соединениям. Каждое соединение — отдельный подписчик с собственной задачей `pump`.
+- **Фильтрация на сервере** — `pump` отдаёт клиенту только события с его `user_id`, чужие молча пропускает. Приватность обеспечена на транспорте: чужие `tx_id`/`tx_hash` физически не уходят на клиент.
+- **Аутентификация до апгрейда** — JWT едет в `Sec-WebSocket-Protocol` (браузер не шлёт `Authorization` при рукопожатии); невалидный токен → `401`, апгрейда нет. Сервер эхом возвращает subprotocol, иначе строгие клиенты рвут соединение.
+- **Это уведомления, а не источник истины.** Правда — в БД/REST; WS лишь доставляет «поменялось». Пропущенное событие (медленный клиент, `Lagged`, реконнект) не ломает корректность — клиент до-синхронизируется обычным REST/GraphQL. На фронте канал закрыт реконнектом и polling-фолбэком.
 
 ---
 
