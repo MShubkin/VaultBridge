@@ -2,7 +2,7 @@
 
 > Кастодиальный кошелёк на Rust сразу для нескольких блокчейнов: заводит адреса, хранит ключи в изоляции, собирает и подписывает транзакции, отдаёт балансы и историю через REST, GraphQL и WebSocket. Это портфолио-проект — на нём я показываю, как строю безопасные сервисы на боевом Rust-стеке.
 
-[![CI](https://github.com/)](.github/workflows/ci.yml) · Rust 1.95 · axum 0.8 · Next.js 15
+[![CI](https://github.com/MShubkin/VaultBridge/actions/workflows/ci.yml/badge.svg)](https://github.com/MShubkin/VaultBridge/actions/workflows/ci.yml) · Rust 1.95 · axum 0.8 · Next.js 15
 
 ---
 
@@ -75,16 +75,17 @@ sequenceDiagram
     GW->>GW: гейты — ownership · KYC · адрес · AML
     GW->>GW: per-wallet lock (advisory)
     GW->>N: estimate_fee + balance (свежий)
-    GW->>DB: tx = pending (+ outbox)
-    GW->>S: sign(derivation_path, sighash)
+    GW->>DB: tx pending (created → signing)
+    GW->>S: sign(derivation_path, payload)
     S-->>GW: signature (ключ НЕ покидает сервис)
+    GW->>DB: status = broadcast (+ предвычисленный txid)
     GW->>N: broadcast(signed)
     N-->>GW: tx_hash
     GW->>DB: status = unconfirmed
     GW-->>U: 200 { tx_id, unconfirmed, tx_hash }
 ```
 
-Машина состояний транзакции (`core-domain::TxStatus`):
+Машина состояний транзакции (`core-domain::TransactionStatus`):
 
 ```mermaid
 stateDiagram-v2
@@ -263,7 +264,7 @@ cargo run -p api-gateway
 | Хранилище | PostgreSQL (`diesel`/`diesel-async`), Redis, ClickHouse |
 | Наблюдаемость | `tracing`, Prometheus-метрики, `/healthz` + `/readyz` |
 | Фронтенд | Next.js 15 + TypeScript, TanStack Query, Tailwind, деньги на `bigint` |
-| Тесты | `cargo test` (unit/property/integration), Vitest + Playwright |
+| Тесты | `cargo test` (unit + интеграционные, включая loopback-mTLS), Vitest (фронт) |
 
 ---
 
@@ -272,7 +273,7 @@ cargo run -p api-gateway
 ```
 VaultBridge/
 ├── crates/
-│   ├── core-domain/      # Chain, KycStatus, Role, Amount<U256>, TxStatus (FSM), newtypes
+│   ├── core-domain/      # Chain, KycStatus, Role, Amount<U256>, TransactionStatus (FSM), newtypes
 │   ├── storage/          # репозитории/кеш/локи/аналитика: Postgres(diesel-async) · Redis · ClickHouse
 │   ├── blockchain/       # trait BlockchainClient + ChainConfig (+ MockChain под фичой testing)
 │   ├── chain-evm/        # alloy-адаптер (EIP-1559 build/sign/broadcast/confirmations)
@@ -380,6 +381,7 @@ npm run dev                       # http://localhost:3000
 | `POST` | `/v1/wallets/{id}/withdraw/quote` | оценка комиссии/итога без побочек |
 | `POST` | `/v1/wallets/{id}/withdraw` | вывод (сага; `Idempotency-Key`) |
 | `POST` | `/v1/graphql` | агрегированный портфель по сетям |
+| `GET` | `/v1/ws` | real-time события статусов (JWT через `Sec-WebSocket-Protocol`) |
 | `GET` | `/v1/ops/audit` · `/v1/ops/withdrawals` | операторский доступ (`operator`) |
 | `GET` | `/healthz` · `/readyz` · `/metrics` | liveness / readiness / Prometheus |
 
