@@ -17,6 +17,7 @@
 - [Модель данных](#модель-данных)
 - [Ключевые решения](#ключевые-решения)
 - [Модель угроз и решения по безопасности](#модель-угроз-и-решения-по-безопасности)
+- [Конфигурация](#конфигурация)
 - [Сборка и запуск](#сборка-и-запуск)
 - [Тестирование](#тестирование)
 - [Деплой (Railway + Vercel)](#деплой-railway--vercel)
@@ -241,17 +242,7 @@ SIGNER_TLS_CA=certs/ca.crt SIGNER_TLS_DOMAIN=localhost \
 cargo run -p api-gateway
 ```
 
-| Переменная | Сторона | Назначение |
-|------------|---------|-----------|
-| `SIGNER_GRPC_ENDPOINT` | gateway | адрес signing-service (обязателен) |
-| `SIGNER_TLS_CLIENT_CERT` / `_KEY` | gateway | клиентский сертификат/ключ (mTLS) |
-| `SIGNER_TLS_CA` | gateway | CA для проверки сервера |
-| `SIGNER_TLS_DOMAIN` | gateway | ожидаемый SAN сервера |
-| `SIGNER_BIND` | signing | адрес прослушивания (деф. `0.0.0.0:50051`) |
-| `SIGNER_TLS_CERT` / `_KEY` | signing | серверный сертификат/ключ |
-| `SIGNER_TLS_CLIENT_CA` | signing | CA для проверки клиента (включает mTLS) |
-
-Если TLS-переменные не заданы, канал остаётся plaintext — это допустимо только в доверенной приватной сети для локальной отладки. В проде сертификаты выдаёт внутренний CA / cert-manager / service-mesh (например SPIFFE), а не демо-скрипт.
+Все переменные канала (`SIGNER_GRPC_ENDPOINT`, `SIGNER_TLS_*`, `SIGNER_BIND`) сведены в раздел [Конфигурация](#конфигурация). Если `SIGNER_TLS_*` не заданы, канал остаётся plaintext — это допустимо только в доверённой приватной сети для локальной отладки. В проде сертификаты выдаёт внутренний CA / cert-manager / service-mesh (например SPIFFE), а не демо-скрипт.
 
 ---
 
@@ -397,6 +388,42 @@ erDiagram
 | Отсутствие следа операций | Append-only аудит-лог (успех и отказы) |
 
 Денежные величины — целочисленные минимальные единицы (`U256`, в БД `NUMERIC(78,0)`), никогда `f64`/`Number`; на фронте — `bigint`. Точность стережётся на обеих границах (ввод и хранение).
+
+---
+
+## Конфигурация
+
+Всё задаётся переменными окружения (пример — в `.env.example`). Обязательные относятся к `api-gateway`: без любой из них он не стартует (fail-fast). `signing-service` запускается отдельным процессом со своим набором.
+
+| Переменная | Сервис | Обяз. | Дефолт | Назначение |
+|------------|--------|:-----:|--------|-----------|
+| `JWT_SECRET` | gateway | да | — | секрет подписи JWT |
+| `DATABASE_URL` | gateway | да | — | Postgres (diesel-async) |
+| `REDIS_URL` | gateway | да | — | Redis: кеш балансов + идемпотентность |
+| `CLICKHOUSE_URL` | gateway | да | — | ClickHouse (HTTP) для аналитики |
+| `EVM_RPC_URL` | gateway | да | — | JSON-RPC EVM-сети |
+| `KYC_PROVIDER_URL` | gateway | да | — | внешний KYC-провайдер (HTTP) |
+| `AML_SCREENING_URL` | gateway | да | — | внешний AML-скрининг (HTTP) |
+| `SIGNER_GRPC_ENDPOINT` | gateway | да | — | адрес `signing-service` |
+| `BTC_ESPLORA_URL` | gateway | нет | — | Esplora API; без неё Bitcoin отключён |
+| `SOLANA_RPC_URL` | gateway | нет | — | RPC Solana; без неё Solana отключена |
+| `SIGNER_TLS_CLIENT_CERT` | gateway | нет¹ | — | клиентский сертификат (mTLS) |
+| `SIGNER_TLS_CLIENT_KEY` | gateway | нет¹ | — | клиентский ключ (mTLS) |
+| `SIGNER_TLS_CA` | gateway | нет¹ | — | CA для проверки сервера |
+| `SIGNER_TLS_DOMAIN` | gateway | нет¹ | — | ожидаемый SAN сервера |
+| `SCAN_INTERVAL_SECS` | gateway | нет | `15` | период реконсилятора, сек |
+| `PORT` | gateway | нет | `8080` | порт HTTP |
+| `CORS_ORIGIN` | gateway | нет | permissive | разрешённый origin фронта |
+| `SIGNER_MNEMONIC` | signing | нет² | dev-мнемоника | seed (в проде — из KMS/secret) |
+| `SIGNER_BIND` | signing | нет | `0.0.0.0:50051` | адрес прослушивания gRPC |
+| `SIGNER_TLS_CERT` | signing | нет³ | — | серверный сертификат |
+| `SIGNER_TLS_KEY` | signing | нет³ | — | серверный ключ |
+| `SIGNER_TLS_CLIENT_CA` | signing | нет³ | — | CA для проверки клиента (включает mTLS) |
+| `RUST_LOG` | оба | нет | `info` | уровень логов (`tracing` `EnvFilter`) |
+
+¹ Клиентский mTLS включается, только если заданы все четыре `SIGNER_TLS_*`; иначе канал к signer остаётся plaintext (допустимо лишь в доверённой сети).
+² Dev-дефолт — известная тест-мнемоника; в production обязателен реальный секрет из KMS/secret-хранилища.
+³ Серверный mTLS включается, только если заданы все три; иначе `signing-service` слушает plaintext.
 
 ---
 
