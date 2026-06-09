@@ -10,14 +10,14 @@
 
 - [Что это](#что-это)
 - [Архитектура](#архитектура)
-- [Обзор API](#обзор-api)
+- [Ключевые решения](#ключевые-решения)
 - [Реконсиляция (block-scanner)](#реконсиляция-block-scanner)
 - [Real-time (WebSocket)](#real-time-websocket)
 - [Канал к signing-service (gRPC, mTLS)](#канал-к-signing-service-grpc-mtls)
+- [Обзор API](#обзор-api)
+- [Модель данных](#модель-данных)
 - [Технологический стек](#технологический-стек)
 - [Структура репозитория](#структура-репозитория)
-- [Модель данных](#модель-данных)
-- [Ключевые решения](#ключевые-решения)
 - [Модель угроз и решения по безопасности](#модель-угроз-и-решения-по-безопасности)
 - [Конфигурация](#конфигурация)
 - [Сборка и запуск](#сборка-и-запуск)
@@ -120,65 +120,17 @@ stateDiagram-v2
 
 ---
 
-## Обзор API
+## Ключевые решения
 
-Три транспорта: **REST** (основное), **GraphQL** (агрегированный портфель) и **WebSocket** (real-time статусы). Полный машинно-читаемый контракт публикуется как OpenAPI на `/api-docs/openapi.json` — из него генерятся типы фронта.
+Короткая выжимка «почему именно так» — то, что стоит за кодом.
 
-| Метод | Путь | Доступ | Назначение |
-|-------|------|--------|-----------|
-| `POST` | `/v1/auth/login` | публичный | выпуск JWT |
-| `POST` | `/v1/users` | публичный | регистрация + KYC-онбординг |
-| `GET` | `/v1/users/{id}` | JWT | профиль пользователя |
-| `GET` · `POST` | `/v1/wallets` | JWT | список / создание кошелька (HD-адрес) |
-| `GET` | `/v1/wallets/{id}/transactions` | JWT | история кошелька (курсорная пагинация) |
-| `POST` | `/v1/wallets/{id}/withdraw/quote` | JWT | оценка комиссии/итога без побочных эффектов |
-| `POST` | `/v1/wallets/{id}/withdraw` | JWT | вывод средств (сага; `Idempotency-Key`) |
-| `POST` | `/v1/graphql` | JWT | агрегированный портфель по сетям |
-| `GET` | `/v1/ws` | JWT¹ | real-time события статусов транзакций |
-| `GET` | `/v1/ops/audit` · `/v1/ops/withdrawals` | operator | аудит-лог / все выводы по всем пользователям |
-| `GET` | `/healthz` · `/readyz` · `/metrics` | публичный | liveness / readiness / Prometheus |
-
-¹ WebSocket: JWT передаётся как `Sec-WebSocket-Protocol` (браузер не шлёт `Authorization` при апгрейде); сервер фильтрует поток по кошелькам пользователя.
-
-**Аутентификация и доступ.** Токен — `Authorization: Bearer <jwt>` с claims `sub`/`role`/`exp`. Обычный пользователь видит только свои ресурсы (экстрактор `OwnedWallet`, чужой кошелёк → `404`, а не `403`). Операторские `/v1/ops/*` требуют роль `operator` (`RequireOperator`).
-
-**Формат ошибок.** Всегда `{ "code": "...", "message": "..." }`, без утечки внутренних деталей (SQL/RPC — только в логах). Коды: `401` unauthorized, `403` forbidden, `404` not_found, `409` conflict (в т.ч. параллельный дубль по `Idempotency-Key`), `422` validation / limit_exceeded, `500` internal.
-
-**Деньги.** Все суммы в телах — строки в минимальных единицах сети (`amount_raw`, `fee_raw`, … как `U256`), без `float`.
-
-**Основные потоки (тела запроса/ответа):**
-
-```http
-POST /v1/auth/login
-{ "email": "user@example.com", "password": "..." }
-→ 200 { "access_token": "<jwt>", "expires_in": 3600 }
-→ 401 при неверных данных (не различаем «нет пользователя» и «неверный пароль»)
-```
-
-```http
-POST /v1/wallets            Authorization: Bearer <jwt>
-{ "chain": "ethereum" }
-→ 200 { "id": "...", "chain": "ethereum",
-        "address": "0x..", "derivation_path": "m/44'/60'/0'/0/0",
-        "created_at_unix": 1750000000 }
-```
-
-```http
-POST /v1/wallets/{id}/withdraw/quote        Authorization: Bearer <jwt>
-{ "to_address": "0x..", "amount_raw": "1000000000000000", "max_fee_raw": null }
-→ 200 { "estimated_fee_raw": "...", "max_fee_raw": "...",
-        "total_debit_raw": "...", "spendable_raw": "..." }   // без побочек, для предпросмотра
-```
-
-```http
-POST /v1/wallets/{id}/withdraw
-Authorization: Bearer <jwt>
-Idempotency-Key: 4f3c...   (обязателен)
-{ "to_address": "0x..", "amount_raw": "1000000000000000" }
-→ 200 { "tx_id": "...", "status": "unconfirmed", "tx_hash": "0x..", "fee_raw": "..." }
-```
-
-Вывод запускает сагу с гейтами: ownership → KYC → валидация адреса/сети → AML → per-wallet lock → достаточность средств (`spendable ≥ amount + fee`), dust-лимит и потолок комиссии. Повтор с тем же `Idempotency-Key` возвращает сохранённый ответ, параллельный дубль → `409`. Дальше статус доводит фоновый [реконсилятор](#реконсиляция-block-scanner), а клиент может слушать переходы по `GET /v1/ws`.
+- **Деньги — целое `U256` (в БД `NUMERIC(78,0)`/TEXT, на фронте `bigint`), без float.** В финтехе ошибка округления — это потерянные средства. Минимальные единицы сети (wei / satoshi / lamports) и checked-арифметика убирают класс багов с плавающей точкой сразу на обеих границах — ввода и хранения.
+- **Каждый бэкенд спрятан за трейтом, реализация выбирается по env.** `BlockchainClient`, `Signer`, репозитории, кеш, локи, аналитика — всё за трейт-объектами. Сага и хендлеры не знают, Postgres это или мок, EVM или Solana. Смена хранилища или добавление сети не трогает бизнес-логику.
+- **`Signer` async, и в проде он удалённый.** Подпись могла бы быть обычным вызовом функции, но async-трейт позволяет той же абстракцией закрыть и сетевой `RemoteSigner` поверх gRPC + mTLS. Так граница изоляции ключей становится сетевой, а сагу переписывать не пришлось.
+- **Вывод оформлен сагой, а не одной транзакцией.** Операция размазана по БД, signing-service и RPC — единого `COMMIT` на всех троих не существует. Идемпотентность, per-wallet lock, конечный автомат статусов и реконсиляция дают «довести до конца или безопасно остановиться» — без потерь и задвоений.
+- **`txid` вычисляется до broadcast.** Для всех трёх сетей идентификатор однозначно выводится из подписанных байт, поэтому хэш пишется в БД ещё до отправки. Падение в момент broadcast не оставляет запись без хэша — реконсилятор её досверит, а повторная отправка идемпотентна.
+- **Production-only, тест-двойники за фичей `testing`.** Никаких тихих in-memory/mock-фолбэков в боевом бинаре: нет обязательной переменной — сервис не стартует (fail-fast). Двойники компилируются только в тестах, поэтому прод чистый, а тест-сьют остаётся зелёным.
+- **Per-chain различия — это данные (`ChainConfig`), а не `match` по `Chain`.** decimals, порог подтверждений, dust-лимит лежат в конфиге; ветвлений по сети в логике нет, добавить сеть — значит добавить адаптер и строку конфига.
 
 ---
 
@@ -352,46 +304,65 @@ cargo run -p api-gateway
 
 ---
 
-## Технологический стек
+## Обзор API
 
-| Слой | Технологии |
-|------|-----------|
-| HTTP/API | `axum` 0.8, `tower`, REST + GraphQL (`async-graphql`) + WebSocket |
-| Контракт | OpenAPI (`utoipa`) → кодоген типов фронта |
-| Async | `tokio` |
-| Криптография | `bip39`/`bip32` (secp256k1), SLIP-0010 (ed25519), `k256`, `ed25519-dalek`, `aes-gcm` (envelope), `argon2`, `zeroize` |
-| Сети | `alloy` (EVM), `rust-bitcoin` + Esplora (BTC), JSON-RPC + ручной wire (Solana, без `solana-sdk`) |
-| gateway↔signing | `tonic`/`prost` (gRPC), взаимный TLS (`rustls` через tonic), контракт в крейте `proto` |
-| Хранилище | PostgreSQL (`diesel`/`diesel-async`), Redis, ClickHouse |
-| Наблюдаемость | `tracing`, Prometheus-метрики, `/healthz` + `/readyz` |
-| Фронтенд | Next.js 15 + TypeScript, TanStack Query, Tailwind, деньги на `bigint` |
-| Тесты | `cargo test` (unit + интеграционные, включая loopback-mTLS), Vitest (фронт) |
+Три транспорта: **REST** (основное), **GraphQL** (агрегированный портфель) и **WebSocket** (real-time статусы). Полный машинно-читаемый контракт публикуется как OpenAPI на `/api-docs/openapi.json` — из него генерятся типы фронта.
 
----
+| Метод | Путь | Доступ | Назначение |
+|-------|------|--------|-----------|
+| `POST` | `/v1/auth/login` | публичный | выпуск JWT |
+| `POST` | `/v1/users` | публичный | регистрация + KYC-онбординг |
+| `GET` | `/v1/users/{id}` | JWT | профиль пользователя |
+| `GET` · `POST` | `/v1/wallets` | JWT | список / создание кошелька (HD-адрес) |
+| `GET` | `/v1/wallets/{id}/transactions` | JWT | история кошелька (курсорная пагинация) |
+| `POST` | `/v1/wallets/{id}/withdraw/quote` | JWT | оценка комиссии/итога без побочных эффектов |
+| `POST` | `/v1/wallets/{id}/withdraw` | JWT | вывод средств (сага; `Idempotency-Key`) |
+| `POST` | `/v1/graphql` | JWT | агрегированный портфель по сетям |
+| `GET` | `/v1/ws` | JWT¹ | real-time события статусов транзакций |
+| `GET` | `/v1/ops/audit` · `/v1/ops/withdrawals` | operator | аудит-лог / все выводы по всем пользователям |
+| `GET` | `/healthz` · `/readyz` · `/metrics` | публичный | liveness / readiness / Prometheus |
 
-## Структура репозитория
+¹ WebSocket: JWT передаётся как `Sec-WebSocket-Protocol` (браузер не шлёт `Authorization` при апгрейде); сервер фильтрует поток по кошелькам пользователя.
 
+**Аутентификация и доступ.** Токен — `Authorization: Bearer <jwt>` с claims `sub`/`role`/`exp`. Обычный пользователь видит только свои ресурсы (экстрактор `OwnedWallet`, чужой кошелёк → `404`, а не `403`). Операторские `/v1/ops/*` требуют роль `operator` (`RequireOperator`).
+
+**Формат ошибок.** Всегда `{ "code": "...", "message": "..." }`, без утечки внутренних деталей (SQL/RPC — только в логах). Коды: `401` unauthorized, `403` forbidden, `404` not_found, `409` conflict (в т.ч. параллельный дубль по `Idempotency-Key`), `422` validation / limit_exceeded, `500` internal.
+
+**Деньги.** Все суммы в телах — строки в минимальных единицах сети (`amount_raw`, `fee_raw`, … как `U256`), без `float`.
+
+**Основные потоки (тела запроса/ответа):**
+
+```http
+POST /v1/auth/login
+{ "email": "user@example.com", "password": "..." }
+→ 200 { "access_token": "<jwt>", "expires_in": 3600 }
+→ 401 при неверных данных (не различаем «нет пользователя» и «неверный пароль»)
 ```
-VaultBridge/
-├── crates/
-│   ├── core-domain/      # Chain, KycStatus, Role, Amount<U256>, TransactionStatus (FSM), newtypes
-│   ├── storage/          # репозитории/кеш/локи/аналитика: Postgres(diesel-async) · Redis · ClickHouse
-│   ├── blockchain/       # trait BlockchainClient + ChainConfig (+ MockChain под фичой testing)
-│   ├── chain-evm/        # alloy-адаптер (EIP-1559 build/sign/broadcast/confirmations)
-│   ├── chain-btc/        # rust-bitcoin + Esplora (legacy-P2PKH UTXO spend)
-│   ├── chain-sol/        # JSON-RPC + ручной wire (System transfer, ed25519)
-│   ├── signing-service/  # HD-деривация, envelope encryption, multisig, подпись + gRPC-сервер (lib + bin)
-│   ├── kyc-aml/          # KycProvider + AmlScreener (HTTP-провайдеры; моки — под фичой testing)
-│   ├── proto/            # gRPC-контракт Signer (tonic/prost) + mTLS-строители (proto::tls)
-│   └── api-gateway/      # axum-сервер: auth/RBAC, сага, GraphQL, ops, scanner, RemoteSigner
-├── ui/                   # Next.js фронтенд (auth, кошельки, вывод, real-time, операторская консоль)
-├── migrations/           # SQL-схема (применяется на старте, идемпотентно)
-├── scripts/gen-certs.sh  # демо CA + server/client серты для mTLS (не коммитятся)
-├── Dockerfile            # multi-stage сборка api-gateway
-├── railway.json          # деплой-конфиг (Railway)
-├── docker-compose.yml    # postgres / redis / clickhouse (локально)
-└── .github/workflows/    # CI: fmt + clippy + test + build (backend), tsc/lint/test/build (ui)
+
+```http
+POST /v1/wallets            Authorization: Bearer <jwt>
+{ "chain": "ethereum" }
+→ 200 { "id": "...", "chain": "ethereum",
+        "address": "0x..", "derivation_path": "m/44'/60'/0'/0/0",
+        "created_at_unix": 1750000000 }
 ```
+
+```http
+POST /v1/wallets/{id}/withdraw/quote        Authorization: Bearer <jwt>
+{ "to_address": "0x..", "amount_raw": "1000000000000000", "max_fee_raw": null }
+→ 200 { "estimated_fee_raw": "...", "max_fee_raw": "...",
+        "total_debit_raw": "...", "spendable_raw": "..." }   // без побочек, для предпросмотра
+```
+
+```http
+POST /v1/wallets/{id}/withdraw
+Authorization: Bearer <jwt>
+Idempotency-Key: 4f3c...   (обязателен)
+{ "to_address": "0x..", "amount_raw": "1000000000000000" }
+→ 200 { "tx_id": "...", "status": "unconfirmed", "tx_hash": "0x..", "fee_raw": "..." }
+```
+
+Вывод запускает сагу с гейтами: ownership → KYC → валидация адреса/сети → AML → per-wallet lock → достаточность средств (`spendable ≥ amount + fee`), dust-лимит и потолок комиссии. Повтор с тем же `Idempotency-Key` возвращает сохранённый ответ, параллельный дубль → `409`. Дальше статус доводит фоновый [реконсилятор](#реконсиляция-block-scanner), а клиент может слушать переходы по `GET /v1/ws`.
 
 ---
 
@@ -459,17 +430,46 @@ erDiagram
 
 ---
 
-## Ключевые решения
+## Технологический стек
 
-Короткая выжимка «почему именно так» — то, что стоит за кодом.
+| Слой | Технологии |
+|------|-----------|
+| HTTP/API | `axum` 0.8, `tower`, REST + GraphQL (`async-graphql`) + WebSocket |
+| Контракт | OpenAPI (`utoipa`) → кодоген типов фронта |
+| Async | `tokio` |
+| Криптография | `bip39`/`bip32` (secp256k1), SLIP-0010 (ed25519), `k256`, `ed25519-dalek`, `aes-gcm` (envelope), `argon2`, `zeroize` |
+| Сети | `alloy` (EVM), `rust-bitcoin` + Esplora (BTC), JSON-RPC + ручной wire (Solana, без `solana-sdk`) |
+| gateway↔signing | `tonic`/`prost` (gRPC), взаимный TLS (`rustls` через tonic), контракт в крейте `proto` |
+| Хранилище | PostgreSQL (`diesel`/`diesel-async`), Redis, ClickHouse |
+| Наблюдаемость | `tracing`, Prometheus-метрики, `/healthz` + `/readyz` |
+| Фронтенд | Next.js 15 + TypeScript, TanStack Query, Tailwind, деньги на `bigint` |
+| Тесты | `cargo test` (unit + интеграционные, включая loopback-mTLS), Vitest (фронт) |
 
-- **Деньги — целое `U256` (в БД `NUMERIC(78,0)`/TEXT, на фронте `bigint`), без float.** В финтехе ошибка округления — это потерянные средства. Минимальные единицы сети (wei / satoshi / lamports) и checked-арифметика убирают класс багов с плавающей точкой сразу на обеих границах — ввода и хранения.
-- **Каждый бэкенд спрятан за трейтом, реализация выбирается по env.** `BlockchainClient`, `Signer`, репозитории, кеш, локи, аналитика — всё за трейт-объектами. Сага и хендлеры не знают, Postgres это или мок, EVM или Solana. Смена хранилища или добавление сети не трогает бизнес-логику.
-- **`Signer` async, и в проде он удалённый.** Подпись могла бы быть обычным вызовом функции, но async-трейт позволяет той же абстракцией закрыть и сетевой `RemoteSigner` поверх gRPC + mTLS. Так граница изоляции ключей становится сетевой, а сагу переписывать не пришлось.
-- **Вывод оформлен сагой, а не одной транзакцией.** Операция размазана по БД, signing-service и RPC — единого `COMMIT` на всех троих не существует. Идемпотентность, per-wallet lock, конечный автомат статусов и реконсиляция дают «довести до конца или безопасно остановиться» — без потерь и задвоений.
-- **`txid` вычисляется до broadcast.** Для всех трёх сетей идентификатор однозначно выводится из подписанных байт, поэтому хэш пишется в БД ещё до отправки. Падение в момент broadcast не оставляет запись без хэша — реконсилятор её досверит, а повторная отправка идемпотентна.
-- **Production-only, тест-двойники за фичей `testing`.** Никаких тихих in-memory/mock-фолбэков в боевом бинаре: нет обязательной переменной — сервис не стартует (fail-fast). Двойники компилируются только в тестах, поэтому прод чистый, а тест-сьют остаётся зелёным.
-- **Per-chain различия — это данные (`ChainConfig`), а не `match` по `Chain`.** decimals, порог подтверждений, dust-лимит лежат в конфиге; ветвлений по сети в логике нет, добавить сеть — значит добавить адаптер и строку конфига.
+---
+
+## Структура репозитория
+
+```
+VaultBridge/
+├── crates/
+│   ├── core-domain/      # Chain, KycStatus, Role, Amount<U256>, TransactionStatus (FSM), newtypes
+│   ├── storage/          # репозитории/кеш/локи/аналитика: Postgres(diesel-async) · Redis · ClickHouse
+│   ├── blockchain/       # trait BlockchainClient + ChainConfig (+ MockChain под фичой testing)
+│   ├── chain-evm/        # alloy-адаптер (EIP-1559 build/sign/broadcast/confirmations)
+│   ├── chain-btc/        # rust-bitcoin + Esplora (legacy-P2PKH UTXO spend)
+│   ├── chain-sol/        # JSON-RPC + ручной wire (System transfer, ed25519)
+│   ├── signing-service/  # HD-деривация, envelope encryption, multisig, подпись + gRPC-сервер (lib + bin)
+│   ├── kyc-aml/          # KycProvider + AmlScreener (HTTP-провайдеры; моки — под фичой testing)
+│   ├── proto/            # gRPC-контракт Signer (tonic/prost) + mTLS-строители (proto::tls)
+│   └── api-gateway/      # axum-сервер: auth/RBAC, сага, GraphQL, ops, scanner, RemoteSigner
+├── ui/                   # Next.js фронтенд (auth, кошельки, вывод, real-time, операторская консоль)
+├── migrations/           # SQL-схема (применяется на старте, идемпотентно)
+├── scripts/gen-certs.sh  # демо CA + server/client серты для mTLS (не коммитятся)
+├── Dockerfile            # multi-stage сборка api-gateway
+├── railway.json          # деплой-конфиг (Railway)
+├── docker-compose.yml    # postgres / redis / clickhouse (локально)
+└── .github/workflows/    # CI: fmt + clippy + test + build (backend), tsc/lint/test/build (ui)
+```
 
 ---
 
