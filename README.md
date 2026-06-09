@@ -14,6 +14,7 @@
 - [Канал к signing-service (gRPC, mTLS)](#канал-к-signing-service-grpc-mtls)
 - [Технологический стек](#технологический-стек)
 - [Структура репозитория](#структура-репозитория)
+- [Модель данных](#модель-данных)
 - [Ключевые решения](#ключевые-решения)
 - [Модель угроз и решения по безопасности](#модель-угроз-и-решения-по-безопасности)
 - [Сборка и запуск](#сборка-и-запуск)
@@ -294,6 +295,68 @@ VaultBridge/
 ├── docker-compose.yml    # postgres / redis / clickhouse (локально)
 └── .github/workflows/    # CI: fmt + clippy + test + build (backend), tsc/lint/test/build (ui)
 ```
+
+---
+
+## Модель данных
+
+Схема в Postgres (`migrations/0001_init/up.sql`) — четыре таблицы. Денег и тем более ключей в открытом виде здесь нет: суммы хранятся строкой (`U256` не влезает в `numeric`-тип драйвера без потерь), а приватные ключи в БД не попадают вовсе — только публичные адреса и путь деривации.
+
+```mermaid
+erDiagram
+    users ||--o{ wallets : "владеет"
+    wallets ||--o{ transactions : "имеет"
+    users |o--o{ audit_log : "actor (soft, без FK)"
+
+    users {
+        uuid id PK
+        text email UK
+        text password_hash "argon2"
+        text kyc_status "pending|approved|rejected"
+        text role "user|operator"
+        int  hd_account_index "ветка пользователя в HD-дереве"
+        timestamptz created_at
+    }
+    wallets {
+        uuid id PK
+        uuid user_id FK
+        text chain "ethereum|bitcoin|solana"
+        text address "UNIQUE(chain, address)"
+        text derivation_path "UNIQUE(user_id, path)"
+        timestamptz created_at
+    }
+    transactions {
+        uuid id PK
+        uuid wallet_id FK
+        text chain
+        text direction "incoming|outgoing"
+        text to_address
+        text amount_raw "U256 строкой"
+        text fee_raw
+        text status "FSM: created..confirmed/failed/.."
+        text tx_hash
+        text idempotency_key
+        text tracking "nonce (EVM) / blockhash (SOL)"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    audit_log {
+        bigint id PK
+        uuid actor "кто инициировал (nullable)"
+        text action
+        uuid wallet_id "связанный кошелёк (nullable)"
+        text result "ok|denied|error"
+        timestamptz created_at
+    }
+```
+
+Что важно в схеме:
+
+- **Никаких приватных ключей.** `wallets` хранит только адрес и `derivation_path`; сам ключ выводится из seed в `signing-service`. Утечка БД не даёт доступа к средствам.
+- **Деньги — строки.** `amount_raw`/`fee_raw` — десятичное `U256` текстом; парсинг в целое происходит на границе приложения, без `float` по пути.
+- **Уникальности под бизнес-правила.** `wallets`: `UNIQUE(chain, address)` (один адрес не заводится дважды) и `UNIQUE(user_id, derivation_path)` (детерминированный путь не коллизит). `users.email` уникален.
+- **`transactions.tracking`** — chain-specific токен (EVM nonce / Solana blockhash), по которому реконсилятор отличает «заменена»/«истекла» от «ещё не дошла». Индекс по `wallet_id` ускоряет историю кошелька.
+- **`audit_log` — append-only.** Связь с `users.actor` логическая, без жёсткого FK (журнал переживает удаление субъектов и пишется даже для отказов). В проде на таблицу вешают `REVOKE UPDATE, DELETE`.
 
 ---
 
