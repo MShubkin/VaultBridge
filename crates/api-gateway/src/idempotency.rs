@@ -15,7 +15,9 @@ pub enum Begin {
 
 #[async_trait::async_trait]
 pub trait Idempotency: Send + Sync {
+    /// Попытаться занять ключ и начать операцию. Возвращает, что делать дальше (см. [`Begin`]).
     async fn begin(&self, user: UserId, key: &str) -> Begin;
+    /// Зафиксировать успешный результат под ключом — повтор с тем же ключом вернёт его.
     async fn complete(&self, user: UserId, key: &str, value: serde_json::Value);
     /// Снять `InFlight` при ошибке — разрешить повтор тем же ключом.
     async fn abort(&self, user: UserId, key: &str);
@@ -72,11 +74,15 @@ impl Idempotency for InMemoryIdempotency {
 /// Redis-реализация: `SET key in_flight NX EX` для атомарного входа.
 /// Готовый результат хранится JSON-строкой; ключ неймспейснут по user.
 pub struct RedisIdempotency {
+    /// Мультиплексированное соединение с Redis.
     conn: redis::aio::MultiplexedConnection,
+    /// Сколько живёт ключ идемпотентности. Одновременно это окно, в течение которого повтор
+    /// вернёт сохранённый ответ, а не выполнит операцию заново.
     ttl_secs: u64,
 }
 
 impl RedisIdempotency {
+    /// Подключиться к Redis и запомнить TTL ключей.
     pub async fn connect(url: &str, ttl_secs: u64) -> Result<Self, String> {
         let client = redis::Client::open(url).map_err(|e| e.to_string())?;
         let conn = client
@@ -86,6 +92,7 @@ impl RedisIdempotency {
         Ok(Self { conn, ttl_secs })
     }
 
+    /// Ключ в Redis с неймспейсом по пользователю: чужой ключ не пересечётся со своим.
     fn key(user: UserId, key: &str) -> String {
         format!("idemp:{}:{}", user.0, key)
     }

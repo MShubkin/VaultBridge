@@ -11,15 +11,21 @@ use crate::state::AppState;
 
 const BALANCE_TTL: Duration = Duration::from_secs(30);
 
-/// Кешируемое представление баланса (raw как строки).
+/// Кешируемое представление баланса. Суммы — строки (U256 в десятичном виде), чтобы
+/// пережить сериализацию в JSON без потери точности.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CachedBalance {
+    /// Весь баланс.
     pub total_raw: String,
+    /// Заморожено под незавершённые операции.
     pub reserved_raw: String,
+    /// Доступно к трате (`total - reserved`).
     pub spendable_raw: String,
+    /// Число знаков после запятой у монеты (для отображения).
     pub decimals: u8,
 }
 
+/// Ключ кеша по сети и адресу.
 fn key(chain: Chain, address: &str) -> String {
     format!("balance:{chain}:{address}")
 }

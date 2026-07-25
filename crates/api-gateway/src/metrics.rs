@@ -3,14 +3,20 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Счётчики исходов вывода. Атомарные, поэтому инкремент из разных хендлеров не требует
+/// блокировки, а `render` читает их без остановки записи.
 #[derive(Default)]
 pub struct Metrics {
+    /// Успешные выводы.
     withdraw_ok: AtomicU64,
+    /// Выводы, отклонённые проверками (KYC/AML/лимиты).
     withdraw_denied: AtomicU64,
+    /// Выводы, сорвавшиеся из-за ошибки (сеть, БД, signer).
     withdraw_error: AtomicU64,
 }
 
 impl Metrics {
+    /// Нулевые счётчики.
     pub fn new() -> Self {
         Self::default()
     }

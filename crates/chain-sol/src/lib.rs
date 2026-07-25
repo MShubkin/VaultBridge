@@ -78,33 +78,43 @@ fn build_transfer_message(
     out
 }
 
+/// Solana-адаптер: тонкий JSON-RPC поверх HTTP.
 pub struct SolClient {
+    /// URL JSON-RPC узла (devnet).
     rpc_url: String,
+    /// Переиспользуемый HTTP-клиент.
     http: reqwest::Client,
+    /// Параметры сети.
     config: blockchain::ChainConfig,
 }
 
+/// Обёртка ответа JSON-RPC: ровно одно из полей заполнено — `result` при успехе или
+/// `error` при ошибке.
 #[derive(Deserialize)]
 struct RpcResponse<T> {
     result: Option<T>,
     error: Option<serde_json::Value>,
 }
 
+/// Ответ `getBalance`: баланс в лампортах.
 #[derive(Deserialize)]
 struct BalanceValue {
     value: u64,
 }
 
+/// Ответ `getLatestBlockhash`.
 #[derive(Deserialize)]
 struct LatestBlockhash {
     value: BlockhashInner,
 }
 
+/// Вложенный blockhash в ответе `getLatestBlockhash` (base58-строка).
 #[derive(Deserialize)]
 struct BlockhashInner {
     blockhash: String,
 }
 
+/// Ответ `getSignatureStatuses`: по элементу на каждую запрошенную подпись.
 #[derive(Deserialize)]
 struct SignatureStatuses {
     value: Vec<Option<SignatureStatus>>,
@@ -118,12 +128,14 @@ struct SignatureStatus {
     err: Option<serde_json::Value>,
 }
 
+/// Ответ `isBlockhashValid`: жив ли ещё recent blockhash (не протух ли).
 #[derive(Deserialize)]
 struct BlockhashValid {
     value: bool,
 }
 
 impl SolClient {
+    /// Создать адаптер по URL RPC-узла. Соединение ленивое — поднимается при первом запросе.
     pub fn new(rpc_url: &str, config: blockchain::ChainConfig) -> Self {
         Self {
             rpc_url: rpc_url.to_string(),
@@ -140,6 +152,8 @@ impl SolClient {
         }
     }
 
+    /// Один JSON-RPC вызов. Собирает конверт `{jsonrpc, id, method, params}`, отправляет POST
+    /// и разбирает ответ: поле `error` превращается в `ChainError`, пустой `result` — тоже.
     async fn rpc<T: for<'de> Deserialize<'de>>(
         &self,
         method: &str,

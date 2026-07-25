@@ -73,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Ждать Ctrl-C (SIGINT): по нему tonic перестаёт принимать вызовы и корректно останавливается.
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("signing-service shutdown signal received");

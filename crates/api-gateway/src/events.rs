@@ -17,14 +17,20 @@ use crate::state::AppState;
 /// Событие изменения состояния кошелька. `user_id` — для серверной фильтрации (наружу не идёт).
 #[derive(Clone, Debug)]
 pub struct WalletEvent {
+    /// Владелец кошелька — по нему поток фильтруется, клиенту это поле не уходит.
     pub user_id: UserId,
+    /// Кошелёк, которого касается событие.
     pub wallet_id: WalletId,
+    /// Транзакция, чей статус изменился.
     pub tx_id: String,
+    /// Новый статус.
     pub status: TransactionStatus,
+    /// Хэш в сети, если уже известен.
     pub tx_hash: Option<String>,
 }
 
-/// Публичная проекция события (что уходит клиенту по WS).
+/// Публичная проекция события (что уходит клиенту по WS). Без `user_id`: клиент и так
+/// получает только свои события. Ссылки вместо `String`, чтобы не копировать на каждую отправку.
 #[derive(Serialize)]
 struct WalletEventDto<'a> {
     wallet_id: String,
@@ -33,10 +39,14 @@ struct WalletEventDto<'a> {
     tx_hash: Option<&'a str>,
 }
 
+/// Создать broadcast-канал событий. Буфер на 1024 сообщения: если клиент отстаёт сильнее,
+/// он получит `Lagged` и пропустит часть live-уведомлений (истину всё равно хранит БД/REST).
 pub fn channel() -> broadcast::Sender<WalletEvent> {
     broadcast::Sender::new(1024)
 }
 
+/// Достать JWT из заголовка `Sec-WebSocket-Protocol`. Клиент может прислать список через
+/// запятую — берём первый непустой элемент.
 fn bearer_protocol(headers: &HeaderMap) -> Option<String> {
     headers
         .get("sec-websocket-protocol")

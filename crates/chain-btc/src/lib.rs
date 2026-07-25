@@ -26,6 +26,7 @@ use blockchain::{
 /// Оценка vsize простого перевода (1-in / 2-out, legacy P2PKH) — для комиссии.
 const APPROX_VSIZE: u64 = 226;
 
+/// Один непотраченный выход (UTXO) в ответе Esplora — из него набирается вход транзакции.
 #[derive(Deserialize)]
 struct EsploraUtxo {
     txid: String,
@@ -33,6 +34,7 @@ struct EsploraUtxo {
     value: u64,
 }
 
+/// Статус транзакции из Esplora: включена ли в блок и на какой высоте.
 #[derive(Deserialize)]
 struct EsploraTxStatus {
     confirmed: bool,
@@ -41,23 +43,29 @@ struct EsploraTxStatus {
 
 /// Esplora-клиент (blockstream/mempool testnet API).
 pub struct BtcClient {
+    /// Базовый URL Esplora без хвостового слэша.
     esplora_url: String,
+    /// Переиспользуемый HTTP-клиент (пул соединений внутри).
     http: reqwest::Client,
+    /// Параметры сети.
     config: blockchain::ChainConfig,
 }
 
+/// Агрегированная статистика адреса из Esplora — по ней считается баланс.
 #[derive(Deserialize)]
 struct EsploraStats {
     funded_txo_sum: u64,
     spent_txo_sum: u64,
 }
 
+/// Ответ Esplora по адресу; нужна только подтверждённая часть (`chain_stats`).
 #[derive(Deserialize)]
 struct EsploraAddress {
     chain_stats: EsploraStats,
 }
 
 impl BtcClient {
+    /// Создать адаптер. Хвостовой `/` в URL срезаем, чтобы пути потом склеивались чисто.
     pub fn new(esplora_url: &str, config: blockchain::ChainConfig) -> Self {
         Self {
             esplora_url: esplora_url.trim_end_matches('/').to_string(),
@@ -75,6 +83,7 @@ impl BtcClient {
             .map_err(|_| ChainError::InvalidAddress(Chain::Bitcoin))
     }
 
+    /// Баланс адреса в сатоши. Сначала валидируем адрес, затем читаем статистику из Esplora.
     pub async fn balance(&self, address: &str) -> Result<U256, ChainError> {
         self.parse_testnet_address(address)?;
         let url = format!("{}/address/{address}", self.esplora_url);
@@ -108,6 +117,8 @@ impl BtcClient {
             .map_err(|e| ChainError::Rpc(e.to_string()))
     }
 
+    /// Обернуть общий баланс в `BalanceView`. У Bitcoin нет неснижаемого резерва, поэтому
+    /// доступно к трате столько же, сколько всего.
     pub fn balance_view(&self, total: U256) -> BalanceView {
         BalanceView {
             total: Amount::new(Chain::Bitcoin, total),

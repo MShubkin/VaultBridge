@@ -14,10 +14,12 @@ use crate::Signer;
 
 /// Сервис, оборачивающий любой [`Signer`] (обычно `LocalSigner`) под gRPC.
 pub struct SignerService {
+    /// Крипто-ядро, куда делегируются вызовы. За `Arc<dyn>`, чтобы подменять реализацию.
     inner: Arc<dyn Signer>,
 }
 
 impl SignerService {
+    /// Обернуть готовый signer в gRPC-сервис.
     pub fn new(inner: Arc<dyn Signer>) -> Self {
         Self { inner }
     }

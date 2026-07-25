@@ -27,7 +27,9 @@ pub trait AmlScreener: Send + Sync {
 /// KYC поверх HTTP. Шлёт `POST {url}` с телом `{ "email": ... }` и ждёт в ответ
 /// `{ "status": "pending|approved|rejected" }`.
 pub struct HttpKyc {
+    /// Переиспользуемый HTTP-клиент.
     http: reqwest::Client,
+    /// Эндпоинт внешнего KYC-сервиса.
     url: String,
 }
 
@@ -41,6 +43,7 @@ impl HttpKyc {
     }
 }
 
+/// Ответ KYC-сервиса: строковый статус `pending|approved|rejected`.
 #[derive(Deserialize)]
 struct KycResponse {
     status: String,
@@ -75,7 +78,9 @@ impl KycProvider for HttpKyc {
 /// AML-скрининг поверх HTTP. Шлёт `POST {url}` с телом `{ "chain": ..., "address": ... }`
 /// и ждёт `{ "blacklisted": bool }`.
 pub struct HttpAmlScreener {
+    /// Переиспользуемый HTTP-клиент.
     http: reqwest::Client,
+    /// Эндпоинт внешнего AML-сервиса.
     url: String,
 }
 
@@ -89,6 +94,7 @@ impl HttpAmlScreener {
     }
 }
 
+/// Ответ AML-сервиса: под санкциями ли адрес.
 #[derive(Deserialize)]
 struct AmlResponse {
     blacklisted: bool,
