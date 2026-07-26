@@ -83,7 +83,7 @@ fn build_transfer_message(
     // instructions: одна.
     encode_length(1, &mut out);
     out.push(2); // program_id_index → system_program
-    // Аккаунты, участвующие в инструкции
+                 // Аккаунты, участвующие в инструкции
     encode_length(2, &mut out); // // 2 аккаунта: account indices: from, to
     out.extend_from_slice(&[0u8, 1u8]);
     // Данные инструкции (SystemInstruction::Transfer)
@@ -384,7 +384,6 @@ fn base64_encode(data: &[u8]) -> String {
     }
     out
 }
-
 
 #[cfg(test)]
 mod tests {
