@@ -5,6 +5,12 @@
 //! (compact-u16 «shortvec» + Solana wire-формат) — без `solana-sdk`, в духе остального
 //! тонкого клиента. Read-путь (валидация/баланс/broadcast) — реальный через RPC.
 
+//Потенциальные улучшения:
+//Добавить таймауты для RPC-запросов.
+//Retry-логику при ошибках сети.
+//Кеширование blockhash (можно использовать запасной, если свежий недоступен).
+//Поддержка Versioned-транзакций (TxV0) для композитных инструкций.
+
 use core_domain::{Amount, Chain, U256};
 use serde::Deserialize;
 
@@ -30,13 +36,18 @@ fn decode_pubkey(address: &str) -> Result<[u8; 32], ChainError> {
     Ok(arr)
 }
 
-/// Compact-u16 («shortvec») — так Solana кодирует длины массивов в wire-формате.
+/// Solana использует вариативное кодирование длин массивов для экономии места
+/// Примеры:
+// len = 1 → [0x01] (1 байт)
+// len = 127 → [0x7F] (1 байт)
+// len = 128 → [0x80, 0x01] (2 байта: 128 = 0x80 | 0x01)
+// Это позволяет кодировать числа до 16 бит (макс. 16383) в 1-2 байта
 fn encode_length(mut len: usize, out: &mut Vec<u8>) {
     loop {
         let mut byte = (len & 0x7f) as u8;
         len >>= 7;
         if len != 0 {
-            byte |= 0x80;
+            byte |= 0x80; // Устанавливаем старший бит → "продолжай читать"
         }
         out.push(byte);
         if len == 0 {
@@ -57,22 +68,27 @@ fn build_transfer_message(
     blockhash: &[u8; 32],
 ) -> Vec<u8> {
     let mut out = Vec::new();
-    // Header: num_required_signatures, num_readonly_signed, num_readonly_unsigned.
+    // Header(3 байта): num_required_signatures, num_readonly_signed, num_readonly_unsigned.
+    // 1 подписант (from)
+    // 0 подписантов только для чтения
+    // 1 неподписанный readonly (system_program)
     out.extend_from_slice(&[1, 0, 1]);
-    // account_keys: from (signer/writable), to (writable), system_program (readonly).
+    // account_keys(3 акаунта): from (signer/writable), to (writable), system_program (readonly).
     encode_length(3, &mut out);
-    out.extend_from_slice(from);
+    out.extend_from_slice(from); //index 0: подписант, writable
     out.extend_from_slice(to);
     out.extend_from_slice(&SYSTEM_PROGRAM_ID);
-    // recent_blockhash.
+    // recent_blockhash(32 байта)
     out.extend_from_slice(blockhash);
     // instructions: одна.
     encode_length(1, &mut out);
     out.push(2); // program_id_index → system_program
-    encode_length(2, &mut out); // account indices: from, to
+    // Аккаунты, участвующие в инструкции
+    encode_length(2, &mut out); // // 2 аккаунта: account indices: from, to
     out.extend_from_slice(&[0u8, 1u8]);
-    let mut data = vec![2u8, 0, 0, 0]; // SystemInstruction::Transfer
-    data.extend_from_slice(&lamports.to_le_bytes());
+    // Данные инструкции (SystemInstruction::Transfer)
+    let mut data = vec![2u8, 0, 0, 0]; // u32 LE = 2 (дискриминант). SystemInstruction::Transfer имеет дискриминант 2
+    data.extend_from_slice(&lamports.to_le_bytes()); // сумма в LE(lamports)
     encode_length(data.len(), &mut out);
     out.extend_from_slice(&data);
     out
@@ -211,6 +227,7 @@ impl BlockchainClient for SolClient {
         Ok(Amount::new(Chain::Solana, U256::from(BASE_FEE_LAMPORTS)))
     }
 
+    //Сборка неподписанной транзакции
     async fn build_unsigned(
         &self,
         req: &WithdrawRequest,
@@ -232,6 +249,7 @@ impl BlockchainClient for SolClient {
         let blockhash = decode_pubkey(&bh.value.blockhash)
             .map_err(|_| ChainError::Rpc("bad blockhash".into()))?;
 
+        // Строим message
         let message = build_transfer_message(&from, &to, lamports, &blockhash);
         // Account-модель Solana: один подписант (плательщик) подписывает ВСЁ сообщение.
         Ok(UnsignedTransaction {
@@ -247,6 +265,8 @@ impl BlockchainClient for SolClient {
         })
     }
 
+    //Сборка подписанной транзакции
+    //Итоговый wire-формат:[shortvec_len][sig1][sig2]...[message]
     fn assemble_signed(
         &self,
         unsigned: &UnsignedTransaction,
@@ -261,6 +281,7 @@ impl BlockchainClient for SolClient {
         }
         // Транзакция = compact-массив подписей (по 64 байта, ed25519) ++ message.
         let mut raw = Vec::new();
+        //Compact-массив подписей
         encode_length(signatures.len(), &mut raw);
         for sig in signatures {
             if sig.len() != 64 {
@@ -268,6 +289,7 @@ impl BlockchainClient for SolClient {
             }
             raw.extend_from_slice(sig);
         }
+        // Само сообщение (без изменений)
         raw.extend_from_slice(&unsigned.context);
         Ok(SignedTransaction {
             chain: Chain::Solana,
@@ -295,7 +317,7 @@ impl BlockchainClient for SolClient {
             .await?;
         Ok(sig)
     }
-
+    //Проверка статуса
     async fn tx_status(
         &self,
         tx_hash: &str,
@@ -327,7 +349,7 @@ impl BlockchainClient for SolClient {
                         )
                         .await?;
                     if !valid.value {
-                        return Ok(TxObservation::Expired);
+                        return Ok(TxObservation::Expired); // Уже не попадёт в блок
                     }
                 }
                 Ok(TxObservation::NotFound)
@@ -362,6 +384,7 @@ fn base64_encode(data: &[u8]) -> String {
     }
     out
 }
+
 
 #[cfg(test)]
 mod tests {
