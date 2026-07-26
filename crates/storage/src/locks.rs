@@ -93,11 +93,16 @@ impl WalletLock for PgWalletLock {
 
         let key = advisory_key(wallet_id);
         let pool = self.pool.clone();
+        //сигнал от фоновой задачи к основному потоку: «блокировка захвачена».
         let (acquired_tx, acquired_rx) = tokio::sync::oneshot::channel::<()>();
+        //сигнал от основного потока к фоновой задаче: «освобождай блокировку».
         let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
 
         tokio::spawn(async move {
-            // Owned-соединение живёт до конца задачи (то есть до release).
+            // ---Owned-соединение живёт до конца задачи (то есть до release)--
+            //забираем соединение из пула во владение задачи.
+            //Соединение будет жить ровно до завершения задачи, что гарантирует: блокировка удерживается одним соединением,
+            //и оно не возвращается в пул раньше времени
             let mut conn = match pool.get_owned().await {
                 Ok(c) => c,
                 Err(_) => {

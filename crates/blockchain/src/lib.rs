@@ -75,7 +75,7 @@ pub struct BalanceView {
 pub struct WithdrawRequest {
     /// Сеть, в которой делается перевод.
     pub chain: Chain,
-    /// Адрес-источник (наш кошелёк).
+    /// Адрес-источник.
     pub from_address: String,
     /// Адрес-получатель.
     pub to_address: String,
