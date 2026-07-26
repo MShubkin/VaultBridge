@@ -11,10 +11,13 @@ use crate::{hd, multisig, slip10};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SignerError {
+    /// Сеть пока не поддерживается.
     #[error("chain not supported yet: {0}")]
     Unsupported(Chain),
+    /// Ошибка HD-деривации (плохой путь, мнемоника и т.п.).
     #[error(transparent)]
     Hd(#[from] hd::HdError),
+    /// Ошибка envelope-шифрования seed (запечатывание/распечатывание).
     #[error(transparent)]
     Envelope(#[from] envelope::EnvelopeError),
     /// Ошибка удалённого signing-service (gRPC/mTLS-транспорт), для `RemoteSigner`.
@@ -40,6 +43,8 @@ pub struct LocalSigner {
 }
 
 impl LocalSigner {
+    /// Собрать signer из BIP39-мнемоники и (опциональной) passphrase. Из них выводится
+    /// 64-байтовый seed, дальше все ключи деривируются уже из него.
     pub fn from_mnemonic(phrase: &str, passphrase: &str) -> Result<Self, SignerError> {
         Ok(Self {
             seed: hd::seed_from_mnemonic(phrase, passphrase)?,

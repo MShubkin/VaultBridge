@@ -14,15 +14,25 @@ use crate::{
     Transaction, TransactionRepository, User, UserRepository, Wallet, WalletRepository,
 };
 
+/// Хранилище в оперативной памяти: четыре таблицы, каждая под своим `Mutex`.
+///
+/// Данные живут, пока жив процесс: после рестарта всё пропадает. Годится для тестов и
+/// локального прогона без БД, в production не используется. Блокировки берём по одной
+/// таблице за раз и держим коротко, поэтому дедлоков тут не возникает.
 #[derive(Default)]
 pub struct InMemoryStore {
+    /// Пользователи по их id.
     users: Mutex<HashMap<UserId, User>>,
+    /// Кошельки по id.
     wallets: Mutex<HashMap<WalletId, Wallet>>,
+    /// Транзакции по id — и входящие, и исходящие в одной карте.
     txs: Mutex<HashMap<TransactionId, Transaction>>,
+    /// Аудит-журнал. Он append-only, поэтому обычный `Vec`, а не карта по ключу.
     audit: Mutex<Vec<AuditEntry>>,
 }
 
 impl InMemoryStore {
+    /// Пустое хранилище.
     pub fn new() -> Self {
         Self::default()
     }
@@ -30,8 +40,10 @@ impl InMemoryStore {
 
 #[async_trait::async_trait]
 impl UserRepository for InMemoryStore {
+    /// Завести пользователя. Новичок всегда стартует со статусом KYC `Pending`.
     async fn create(&self, new: NewUser) -> Result<User> {
         let mut users = self.users.lock().unwrap();
+        // Email — это логин, второй такой же заводить нельзя.
         if users.values().any(|u| u.email == new.email) {
             return Err(StorageError::Conflict("email already exists".into()));
         }
@@ -41,6 +53,9 @@ impl UserRepository for InMemoryStore {
             password_hash: new.password_hash,
             kyc_status: KycStatus::Pending,
             role: new.role,
+            // Индекс аккаунта в HD-дереве раздаём по порядку появления. Пользователей
+            // тут не удаляют, поэтому `len()` всегда даёт свежий, ещё не занятый номер —
+            // ветки ключей у разных людей не пересекаются.
             hd_account_index: users.len() as u32,
             created_at: OffsetDateTime::now_utc(),
         };
@@ -48,6 +63,7 @@ impl UserRepository for InMemoryStore {
         Ok(user)
     }
 
+    /// Найти пользователя по id.
     async fn by_id(&self, id: UserId) -> Result<User> {
         self.users
             .lock()
@@ -57,6 +73,8 @@ impl UserRepository for InMemoryStore {
             .ok_or(StorageError::NotFound)
     }
 
+    /// Найти пользователя по email — этим пользуется логин. Линейный перебор: для тестового
+    /// хранилища объёмы небольшие, индекс по email заводить незачем.
     async fn by_email(&self, email: &str) -> Result<User> {
         self.users
             .lock()
@@ -67,6 +85,7 @@ impl UserRepository for InMemoryStore {
             .ok_or(StorageError::NotFound)
     }
 
+    /// Обновить статус KYC. Нет пользователя — `NotFound`.
     async fn set_kyc(&self, id: UserId, status: KycStatus) -> Result<()> {
         let mut users = self.users.lock().unwrap();
         let user = users.get_mut(&id).ok_or(StorageError::NotFound)?;
@@ -77,8 +96,10 @@ impl UserRepository for InMemoryStore {
 
 #[async_trait::async_trait]
 impl WalletRepository for InMemoryStore {
+    /// Создать кошелёк, соблюдая лимит на пользователя и уникальность адреса.
     async fn create(&self, new: NewWallet, max_per_user: usize) -> Result<Wallet> {
         let mut wallets = self.wallets.lock().unwrap();
+        // Считаем, сколько кошельков уже у этого пользователя, и упираемся в лимит.
         let count = wallets
             .values()
             .filter(|w| w.user_id == new.user_id)
@@ -88,6 +109,7 @@ impl WalletRepository for InMemoryStore {
                 "max {max_per_user} wallets per user"
             )));
         }
+        // Один и тот же адрес в одной сети дважды не заводим (в БД это UNIQUE-констрейнт).
         if wallets
             .values()
             .any(|w| w.chain == new.chain && w.address == new.address)
@@ -106,6 +128,8 @@ impl WalletRepository for InMemoryStore {
         Ok(wallet)
     }
 
+    /// Кошельки пользователя, по возрастанию времени создания — так список стабилен между
+    /// вызовами (порядок обхода `HashMap` сам по себе случайный).
     async fn list_for_user(&self, user_id: UserId) -> Result<Vec<Wallet>> {
         let mut list: Vec<Wallet> = self
             .wallets
@@ -119,6 +143,8 @@ impl WalletRepository for InMemoryStore {
         Ok(list)
     }
 
+    /// Достать кошелёк с проверкой владельца. Чужой кошелёк и несуществующий одинаково дают
+    /// `NotFound` — наружу это `404`, который не подсказывает, что такой кошелёк вообще есть.
     async fn owned(&self, id: WalletId, user_id: UserId) -> Result<Wallet> {
         self.wallets
             .lock()
@@ -129,6 +155,8 @@ impl WalletRepository for InMemoryStore {
             .ok_or(StorageError::NotFound)
     }
 
+    /// Достать кошелёк по id без проверки владельца — для внутренних задач (например, сканер
+    /// так находит владельца транзакции). Наружу не выставляется.
     async fn by_id(&self, id: WalletId) -> Result<Wallet> {
         self.wallets
             .lock()
@@ -141,6 +169,8 @@ impl WalletRepository for InMemoryStore {
 
 #[async_trait::async_trait]
 impl TransactionRepository for InMemoryStore {
+    /// Завести исходящую транзакцию в самом начале саги вывода. Комиссия, хэш и токен
+    /// реконсиляции ещё неизвестны, поэтому все они `None`, а статус — `Created`.
     async fn create_outgoing(&self, new: NewOutgoing) -> Result<Transaction> {
         let tx = Transaction {
             id: TransactionId::new(),
@@ -160,6 +190,9 @@ impl TransactionRepository for InMemoryStore {
         Ok(tx)
     }
 
+    /// Перевести транзакцию в новый статус. Хэш и комиссию проставляем, только если они
+    /// пришли: последующие смены статуса передают `None`, и затирать уже известный хэш
+    /// таким `None` нельзя.
     async fn set_status(
         &self,
         id: TransactionId,
@@ -179,6 +212,8 @@ impl TransactionRepository for InMemoryStore {
         Ok(tx.clone())
     }
 
+    /// Сохранить токен реконсиляции (EVM — nonce, Solana — recent blockhash). По нему сканер
+    /// потом отличает «заменена»/«истекла» от «просто ещё не дошла».
     async fn set_tracking(&self, id: TransactionId, tracking: &str) -> Result<()> {
         let mut txs = self.txs.lock().unwrap();
         let tx = txs.get_mut(&id).ok_or(StorageError::NotFound)?;
@@ -186,6 +221,7 @@ impl TransactionRepository for InMemoryStore {
         Ok(())
     }
 
+    /// Достать транзакцию по id.
     async fn get(&self, id: TransactionId) -> Result<Transaction> {
         self.txs
             .lock()
@@ -195,6 +231,7 @@ impl TransactionRepository for InMemoryStore {
             .ok_or(StorageError::NotFound)
     }
 
+    /// История транзакций одного кошелька, по времени создания.
     async fn list_for_wallet(&self, wallet_id: WalletId) -> Result<Vec<Transaction>> {
         let mut list: Vec<Transaction> = self
             .txs
@@ -208,6 +245,8 @@ impl TransactionRepository for InMemoryStore {
         Ok(list)
     }
 
+    /// Все исходящие транзакции по всем пользователям — этим пользуются операторский доступ
+    /// и фоновый реконсилятор, которому нужно обойти всё «в полёте».
     async fn list_all_outgoing(&self) -> Result<Vec<Transaction>> {
         let mut list: Vec<Transaction> = self
             .txs
@@ -224,8 +263,10 @@ impl TransactionRepository for InMemoryStore {
 
 #[async_trait::async_trait]
 impl AuditRepository for InMemoryStore {
+    /// Дописать запись в журнал.
     async fn record(&self, entry: NewAudit) -> Result<()> {
         let mut log = self.audit.lock().unwrap();
+        // id 1-based, как автоинкремент в БД: первая запись получает 1, а не 0.
         let id = log.len() as i64 + 1;
         log.push(AuditEntry {
             id,
@@ -238,6 +279,7 @@ impl AuditRepository for InMemoryStore {
         Ok(())
     }
 
+    /// Прочитать журнал целиком (операторский доступ).
     async fn list(&self) -> Result<Vec<AuditEntry>> {
         Ok(self.audit.lock().unwrap().clone())
     }

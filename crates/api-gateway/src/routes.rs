@@ -48,6 +48,9 @@ use crate::state::AppState;
 )]
 pub struct ApiDoc;
 
+/// Собрать роутер со всеми эндпоинтами и вшитым `AppState`. Порядок сегментов: служебные
+/// ручки (`/healthz`, `/metrics`, ...), затем версионированный `/v1/*`. `AppState` уходит
+/// внутрь через `with_state`, поэтому хендлеры достают зависимости экстрактором `State`.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
@@ -73,6 +76,7 @@ async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
     Json(ApiDoc::openapi())
 }
 
+/// Liveness: процесс жив и отвечает. Зависимости здесь не проверяются — для этого `readyz`.
 async fn healthz() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok" }))
 }
@@ -93,25 +97,42 @@ async fn metrics_handler(State(state): State<AppState>) -> String {
 
 // ---- операторский API (роль operator) ----
 
+/// Строка аудит-лога в виде для операторского ответа. Время — unix-секунды, чтобы фронту
+/// не разбирать формат `OffsetDateTime`.
 #[derive(Serialize)]
 struct AuditDto {
+    /// Идентификатор записи.
     id: i64,
+    /// Кто инициировал (id строкой), если применимо.
     actor: Option<String>,
+    /// Код действия (например, `withdraw.broadcast`).
     action: String,
+    /// Связанный кошелёк, если применимо.
     wallet_id: Option<String>,
+    /// Исход: `ok` | `denied` | `error`.
     result: String,
+    /// Когда произошло, unix-секунды.
     created_at_unix: i64,
 }
 
+/// Исходящая транзакция в операторском списке всех выводов.
 #[derive(Serialize)]
 struct OpsTxDto {
+    /// Идентификатор транзакции.
     id: String,
+    /// Кошелёк-источник.
     wallet_id: String,
+    /// Сеть.
     chain: Chain,
+    /// Адрес получателя.
     to_address: Option<String>,
+    /// Сумма в минимальных единицах (десятичная строка).
     amount_raw: String,
+    /// Текущий статус по конечному автомату.
     status: TransactionStatus,
+    /// Хэш в сети (после broadcast).
     tx_hash: Option<String>,
+    /// Когда создана, unix-секунды.
     created_at_unix: i64,
 }
 
@@ -160,27 +181,39 @@ async fn ops_withdrawals(
 
 // ---- DTO ----
 
+/// Тело запроса на логин.
 #[derive(Deserialize, ToSchema)]
 struct LoginRequest {
+    /// Email (он же логин).
     email: String,
+    /// Пароль в открытом виде — проверяется против argon2-хеша и никуда не сохраняется.
     password: String,
 }
 
+/// Ответ на логин: access-токен и его срок жизни.
 #[derive(Serialize, ToSchema)]
 struct LoginResponse {
+    /// JWT для заголовка `Authorization: Bearer ...`.
     access_token: String,
+    /// Сколько секунд токен действителен.
     expires_in: i64,
 }
 
+/// Тело запроса на регистрацию.
 #[derive(Deserialize, ToSchema)]
 struct CreateUserRequest {
+    /// Email (логин).
     email: String,
+    /// Пароль в открытом виде (минимум 8 символов, хешируется на сервере).
     password: String,
 }
 
+/// Публичный профиль пользователя. Хеша пароля тут нет — наружу он не выходит.
 #[derive(Serialize, ToSchema)]
 struct UserProfile {
+    /// Идентификатор.
     id: Uuid,
+    /// Email.
     email: String,
     /// pending|approved|rejected
     #[schema(value_type = String)]
@@ -201,6 +234,7 @@ impl From<storage::User> for UserProfile {
     }
 }
 
+/// Тело запроса на создание кошелька — нужна только сеть, адрес выведет signing-service.
 #[derive(Deserialize, ToSchema)]
 struct CreateWalletRequest {
     /// ethereum|bitcoin|solana
@@ -208,13 +242,18 @@ struct CreateWalletRequest {
     chain: Chain,
 }
 
+/// Кошелёк в ответе API. Приватного ключа тут нет и быть не может.
 #[derive(Serialize, ToSchema)]
 struct WalletDto {
+    /// Идентификатор.
     id: Uuid,
     #[schema(value_type = String)]
     chain: Chain,
+    /// Публичный адрес.
     address: String,
+    /// Путь HD-деривации.
     derivation_path: String,
+    /// Когда создан, unix-секунды.
     created_at_unix: i64,
 }
 
@@ -230,9 +269,12 @@ impl From<storage::Wallet> for WalletDto {
     }
 }
 
+/// Страница результатов с курсорной пагинацией. `next_cursor = None` — страниц больше нет.
 #[derive(Serialize)]
 struct Page<T> {
+    /// Элементы текущей страницы.
     items: Vec<T>,
+    /// Курсор на следующую страницу (id последнего элемента).
     next_cursor: Option<Uuid>,
 }
 
@@ -376,8 +418,10 @@ async fn list_transactions(
     }))
 }
 
+/// Тело запроса на вывод (и на его котировку).
 #[derive(Deserialize, ToSchema)]
 struct WithdrawRequestDto {
+    /// Адрес получателя.
     to_address: String,
     /// Сумма в минимальных единицах (U256 как строка).
     amount_raw: String,
@@ -385,19 +429,30 @@ struct WithdrawRequestDto {
     max_fee_raw: Option<String>,
 }
 
+/// Ответ на успешный вывод. Статус на этом шаге — `unconfirmed`: транзакция ушла в сеть,
+/// но подтверждений ещё нет (до `confirmed` её доводит фоновый реконсилятор).
 #[derive(Serialize, ToSchema)]
 struct WithdrawResponse {
+    /// Идентификатор транзакции в нашей БД.
     tx_id: String,
+    /// Текущий статус (`unconfirmed`).
     status: String,
+    /// Хэш транзакции в сети.
     tx_hash: Option<String>,
+    /// Фактическая комиссия в минимальных единицах.
     fee_raw: String,
 }
 
+/// Котировка вывода: во что обойдётся операция, без каких-либо побочных эффектов.
 #[derive(Serialize, ToSchema)]
 struct QuoteResponse {
+    /// Оценка комиссии сети.
     estimated_fee_raw: String,
+    /// Потолок комиссии, который применится при выводе.
     max_fee_raw: String,
+    /// Сколько всего спишется (сумма + комиссия).
     total_debit_raw: String,
+    /// Доступный к трате баланс на момент котировки.
     spendable_raw: String,
 }
 

@@ -93,6 +93,8 @@ impl MockChain {
     }
 }
 
+/// Детерминированный хеш набора байтовых кусков в 16-символьную hex-строку. Не крипто —
+/// нужен лишь для стабильных, воспроизводимых в тестах tx-хэшей и payload'ов.
 fn hash_hex(parts: &[&[u8]]) -> String {
     let mut h = DefaultHasher::new();
     for p in parts {
@@ -238,6 +240,8 @@ impl BlockchainClient for MockChain {
     }
 }
 
+/// Разобрать hex-строку в 16 байт (по два символа на байт, лишнее отбрасывается). Обратная
+/// операция к первым 16 байтам `hash_hex` — так sighash кладётся в 32-байтный payload.
 fn hex_to_16(s: &str) -> [u8; 16] {
     let mut out = [0u8; 16];
     let bytes = s.as_bytes();

@@ -10,10 +10,14 @@ use crate::cache::BalanceCache;
 use crate::{Result, StorageError};
 
 pub struct RedisBalanceCache {
+    /// Мультиплексированное соединение с Redis: клонировать его дёшево, поэтому каждый
+    /// вызов берёт свой клон и не сериализует запросы через общий мьютекс.
     conn: redis::aio::MultiplexedConnection,
 }
 
 impl RedisBalanceCache {
+    /// Подключиться к Redis по URL. Ошибку клиента или соединения заворачиваем в
+    /// `StorageError::Backend`.
     pub async fn connect(url: &str) -> Result<Self> {
         let client = redis::Client::open(url).map_err(|e| StorageError::Backend(e.to_string()))?;
         let conn = client

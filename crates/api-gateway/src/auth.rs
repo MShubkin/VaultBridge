@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::error::ApiError;
 use crate::state::AppState;
 
-/// Полезная нагрузка JWT — то, что лежит внутри токена доступа.
+/// Полезная нагрузка JWT(Payload) — то, что лежит внутри токена доступа.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     /// Subject — идентификатор пользователя в виде строки (`UserId`).
@@ -29,7 +29,7 @@ pub struct Claims {
 /// Набор ключей для подписи/проверки JWT. `kid` маркирует версию ключа, чтобы можно было
 /// ротировать секрет, не инвалидируя разом все живые токены.
 pub struct JwtKeys {
-    /// Идентификатор версии ключа (кладётся в заголовок токена).
+    /// Идентификатор версии ключа (кладётся в заголовок токена(Header)).
     kid: String,
     /// Ключ для подписи (выпуска) токенов.
     encoding: EncodingKey,
@@ -40,6 +40,8 @@ pub struct JwtKeys {
 }
 
 impl JwtKeys {
+    /// Собрать ключи из симметричного секрета (HMAC): один и тот же секрет и подписывает,
+    /// и проверяет токены. `kid` — метка версии этого секрета.
     pub fn from_secret(kid: impl Into<String>, secret: &[u8], ttl_secs: i64) -> Self {
         Self {
             kid: kid.into(),
@@ -80,7 +82,9 @@ impl JwtKeys {
 /// Аутентифицированный пользователь, извлечённый из `Authorization: Bearer`.
 #[derive(Debug, Clone, Copy)]
 pub struct AuthUser {
+    /// Кто это (из claim `sub`).
     pub id: UserId,
+    /// Его роль (из claim `role`) — на ней стоят проверки доступа в хендлерах.
     pub role: Role,
 }
 
@@ -124,6 +128,8 @@ impl FromRequestParts<AppState> for RequireOperator {
     }
 }
 
+/// Достать токен из заголовка `Authorization: Bearer <token>`. Нет заголовка или не тот
+/// префикс — `None`, и экстрактор вернёт `401`.
 fn bearer_token(parts: &Parts) -> Option<String> {
     let header = parts.headers.get(axum::http::header::AUTHORIZATION)?;
     let value = header.to_str().ok()?;

@@ -1,6 +1,7 @@
 //! Diesel-схема (соответствует миграциям в `migrations/`). Денежные величины и amount
 //! хранятся как TEXT (десятичная строка U256) — без bigdecimal, лосслессно (см. pg.rs).
 
+// Пользователи. `hd_account_index` — индекс аккаунта в HD-дереве ключей.
 diesel::table! {
     users (id) {
         id -> Uuid,
@@ -13,6 +14,7 @@ diesel::table! {
     }
 }
 
+// Кошельки. Только публичные данные: адрес и путь деривации, приватного ключа тут нет.
 diesel::table! {
     wallets (id) {
         id -> Uuid,
@@ -24,6 +26,9 @@ diesel::table! {
     }
 }
 
+// Транзакции: и входящие, и исходящие. Денежные поля (`amount_raw`, `fee_raw`) — TEXT,
+// то есть десятичная строка U256, чтобы не терять точность. `tracking` — токен реконсиляции
+// (nonce у EVM, recent blockhash у Solana).
 diesel::table! {
     transactions (id) {
         id -> Uuid,
@@ -42,6 +47,7 @@ diesel::table! {
     }
 }
 
+// Аудит-журнал чувствительных операций. Append-only: строки только добавляются.
 diesel::table! {
     audit_log (id) {
         id -> Int8,

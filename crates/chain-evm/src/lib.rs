@@ -24,24 +24,35 @@ use blockchain::{
     SigningRequest, TxObservation, UnsignedTransaction, WithdrawRequest,
 };
 
+/// Газ на простой перевод ETH — фиксированные 21000. Контрактных вызовов адаптер не делает,
+/// поэтому лимит константный, а не оценивается через `eth_estimateGas`.
 const ETH_TRANSFER_GAS: u128 = 21_000;
 
+/// Наш `U256` → `U256` из alloy. Оба 256-битные, поэтому перегоняем через big-endian байты
+/// без потерь.
 fn to_alloy(v: U256) -> AlloyU256 {
     AlloyU256::from_be_bytes(v.to_be_bytes::<32>())
 }
+/// Обратное преобразование: `U256` alloy → наш доменный `U256`.
 fn from_alloy(v: AlloyU256) -> U256 {
     U256::from_be_bytes(v.to_be_bytes::<32>())
 }
 
+/// HTTP-провайдер alloy. Вынесен в алиас, чтобы длинный вложенный тип не тянулся по коду.
 type DynProvider =
     alloy::providers::RootProvider<alloy::transports::http::Http<alloy::transports::http::Client>>;
 
+/// EVM-адаптер: держит HTTP-подключение к узлу и конфиг сети.
 pub struct EvmClient {
+    /// Провайдер для JSON-RPC вызовов к узлу.
     provider: DynProvider,
+    /// Параметры сети (decimals, порог подтверждений и т.п.).
     config: ChainConfig,
 }
 
 impl EvmClient {
+    /// Создать адаптер по URL узла. Плохой URL — сразу ошибка, соединение ленивое (RPC
+    /// поднимается при первом запросе).
     pub fn new(rpc_url: &str, config: ChainConfig) -> Result<Self, ChainError> {
         let url = rpc_url
             .parse()
@@ -50,6 +61,7 @@ impl EvmClient {
         Ok(Self { provider, config })
     }
 
+    /// Разобрать строку в EVM-адрес; неверный формат → `InvalidAddress`.
     fn parse_addr(&self, address: &str) -> Result<Address, ChainError> {
         Address::from_str(address).map_err(|_| ChainError::InvalidAddress(Chain::Ethereum))
     }

@@ -12,8 +12,12 @@ use std::time::Instant;
 
 #[async_trait::async_trait]
 pub trait BalanceCache: Send + Sync {
+    /// Прочитать значение по ключу. `None` — промах или протухшая запись.
     async fn get(&self, key: &str) -> Option<String>;
+    /// Положить значение с временем жизни `ttl`.
     async fn put(&self, key: &str, value: String, ttl: Duration);
+    /// Выкинуть значение из кеша — вызывается после изменения баланса, чтобы не отдать
+    /// устаревшую сумму.
     async fn invalidate(&self, key: &str);
 }
 
@@ -26,6 +30,7 @@ pub struct InMemoryBalanceCache {
 
 #[cfg(any(test, feature = "testing"))]
 impl InMemoryBalanceCache {
+    /// Пустой кеш.
     pub fn new() -> Self {
         Self::default()
     }

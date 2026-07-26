@@ -11,20 +11,30 @@ use crate::state::AppState;
 /// Баланс одного кошелька (зеркало `BalanceView`). Поля → camelCase в схеме.
 #[derive(SimpleObject)]
 pub struct ChainBalance {
+    /// Код сети.
     pub chain: String,
+    /// Публичный адрес кошелька.
     pub address: String,
+    /// Знаков после запятой у монеты.
     pub decimals: i32,
+    /// Весь баланс (десятичная строка).
     pub total_raw: String,
+    /// Заморожено под операции.
     pub reserved_raw: String,
+    /// Доступно к трате.
     pub spendable_raw: String,
 }
 
+/// Портфель пользователя: балансы по всем его кошелькам в одном ответе.
 #[derive(SimpleObject)]
 pub struct Portfolio {
+    /// Владелец.
     pub user_id: String,
+    /// По одному элементу на кошелёк.
     pub balances: Vec<ChainBalance>,
 }
 
+/// Корень GraphQL-запросов. Мутаций и подписок нет — API только на чтение.
 pub struct QueryRoot;
 
 #[Object]
@@ -66,8 +76,10 @@ impl QueryRoot {
     }
 }
 
+/// Готовая схема: только запросы, без мутаций и подписок.
 pub type AppSchema = Schema<QueryRoot, EmptyMutation, EmptySubscription>;
 
+/// Собрать схему. `AppState` кладётся в контекст запроса уже в хендлере, а не здесь.
 pub fn schema() -> AppSchema {
     Schema::build(QueryRoot, EmptyMutation, EmptySubscription).finish()
 }

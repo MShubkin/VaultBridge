@@ -32,6 +32,8 @@ use crate::auth::JwtKeys;
 use crate::idempotency::Idempotency;
 use crate::state::{AppState, Config};
 
+/// Точка входа. Особый режим: `api-gateway openapi` печатает OpenAPI-спеку и выходит — это
+/// используется в сборке фронта для кодогена типов, без поднятия сервера.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("openapi") {
@@ -76,6 +78,9 @@ fn require_env(key: &str) -> anyhow::Result<String> {
     std::env::var(key).map_err(|_| anyhow::anyhow!("{key} is required"))
 }
 
+/// Собрать `AppState` из боевых зависимостей. Каждый обязательный адрес читается из env, и
+/// при его отсутствии сборка падает — сервис не поднимется с тихой заглушкой вместо БД или
+/// signer. Bitcoin и Solana опциональны: их адаптеры включаются, только если задан их RPC.
 async fn build_state() -> anyhow::Result<AppState> {
     let secret = require_env("JWT_SECRET")?;
     let jwt = Arc::new(JwtKeys::from_secret("k1", secret.as_bytes(), 3600));
@@ -241,11 +246,14 @@ fn cors_layer() -> tower_http::cors::CorsLayer {
     }
 }
 
+/// Ждать сигнал остановки (Ctrl-C / SIGINT). Как только он пришёл, `axum` перестаёт
+/// принимать новые соединения и даёт текущим запросам доиграть.
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("shutdown signal received, draining");
 }
 
+/// Инициализировать логирование. Уровень берётся из `RUST_LOG`, по умолчанию `info`.
 fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));

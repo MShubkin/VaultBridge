@@ -53,16 +53,23 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+/// Все репозитории поверх одного пула Postgres. Каждый метод берёт из пула соединение на
+/// время запроса и возвращает обратно — своего состояния в `PgStore` нет.
 pub struct PgStore {
+    /// Пул async-соединений (bb8). Клонируется дёшево, шарится между хендлерами.
     pool: PgPool,
 }
 
 impl PgStore {
+    /// Обернуть готовый пул. Пул создаётся один раз при старте через [`build_pool`].
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 }
 
+/// Перевести ошибку Diesel в доменную `StorageError`. Две ошибки разбираем по смыслу:
+/// «строка не найдена» и нарушение UNIQUE (это конфликт, а не сбой БД). Всё остальное —
+/// `Backend`, наружу оно уйдёт как 500 без деталей.
 fn map_db(e: DieselError) -> StorageError {
     match e {
         DieselError::NotFound => StorageError::NotFound,
@@ -73,12 +80,15 @@ fn map_db(e: DieselError) -> StorageError {
     }
 }
 
+/// Развернуть `Option`, полученный при разборе строкового значения из БД. `None` тут значит
+/// битые данные (например, неизвестный код сети), поэтому это ошибка бэкенда, а не `NotFound`.
 fn parse<T>(opt: Option<T>, what: &str) -> Result<T> {
     opt.ok_or_else(|| StorageError::Backend(format!("invalid {what} in db")))
 }
 
 // ---- users ----
 
+/// Строка таблицы `users` как её видит Diesel: enum-поля тут ещё строки, id — сырой `Uuid`.
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = users)]
 struct UserRow {
@@ -91,6 +101,7 @@ struct UserRow {
     created_at: OffsetDateTime,
 }
 
+/// То, что вставляем при создании пользователя (набор колонок для INSERT).
 #[derive(Insertable)]
 #[diesel(table_name = users)]
 struct UserInsert {
@@ -103,6 +114,8 @@ struct UserInsert {
     created_at: OffsetDateTime,
 }
 
+/// Собрать доменного `User` из строки БД. Строковые коды статуса и роли тут превращаются
+/// обратно в enum'ы; битое значение даёт ошибку бэкенда (см. [`parse`]).
 fn to_user(r: UserRow) -> Result<User> {
     Ok(User {
         id: UserId(r.id),
@@ -123,6 +136,8 @@ impl UserRepository for PgStore {
             .get()
             .await
             .map_err(|e| StorageError::Backend(e.to_string()))?;
+        // Число уже существующих пользователей = следующий индекс HD-аккаунта. Пользователей
+        // не удаляют, поэтому счётчик монотонный и индексы не переиспользуются.
         let count: i64 = users::table
             .count()
             .get_result(&mut conn)
@@ -196,6 +211,7 @@ impl UserRepository for PgStore {
 
 // ---- wallets ----
 
+/// Строка таблицы `wallets`. `chain` тут ещё строка, id/user_id — сырые `Uuid`.
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = wallets)]
 struct WalletRow {
@@ -207,6 +223,7 @@ struct WalletRow {
     created_at: OffsetDateTime,
 }
 
+/// Набор колонок для INSERT нового кошелька.
 #[derive(Insertable)]
 #[diesel(table_name = wallets)]
 struct WalletInsert {
@@ -218,6 +235,7 @@ struct WalletInsert {
     created_at: OffsetDateTime,
 }
 
+/// Собрать доменный `Wallet` из строки БД (код сети → enum `Chain`).
 fn to_wallet(r: WalletRow) -> Result<Wallet> {
     Ok(Wallet {
         id: WalletId(r.id),
@@ -315,6 +333,8 @@ impl WalletRepository for PgStore {
 
 // ---- transactions ----
 
+/// Строка таблицы `transactions`. Суммы (`amount_raw`/`fee_raw`) тут строки — U256 в
+/// десятичном виде; enum-поля тоже строки. Разбор в доменные типы — в [`to_tx`].
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = transactions)]
 struct TxRow {
@@ -332,6 +352,9 @@ struct TxRow {
     created_at: OffsetDateTime,
 }
 
+/// Колонки для INSERT новой транзакции. Здесь только то, что известно на старте саги:
+/// хэша, комиссии и токена реконсиляции ещё нет — они проставляются позже через `set_status`
+/// и `set_tracking`.
 #[derive(Insertable)]
 #[diesel(table_name = transactions)]
 struct TxInsert {
@@ -347,6 +370,8 @@ struct TxInsert {
     updated_at: OffsetDateTime,
 }
 
+/// Собрать доменную `Transaction` из строки БД. Сумма разбирается из десятичной строки в
+/// U256; если строка битая — ошибка бэкенда, ронять число молча нельзя.
 fn to_tx(r: TxRow) -> Result<Transaction> {
     Ok(Transaction {
         id: TransactionId(r.id),
@@ -508,6 +533,7 @@ impl TransactionRepository for PgStore {
 
 // ---- audit ----
 
+/// Строка таблицы `audit_log`.
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = audit_log)]
 struct AuditRow {
@@ -519,6 +545,7 @@ struct AuditRow {
     created_at: OffsetDateTime,
 }
 
+/// Колонки для INSERT записи аудита. `id` не задаём — его выдаёт автоинкремент БД.
 #[derive(Insertable)]
 #[diesel(table_name = audit_log)]
 struct AuditInsert {
